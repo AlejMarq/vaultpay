@@ -1,40 +1,69 @@
-# Node.js dependencies
-node_modules/
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# Next.js build files
-.next/
-out/
-build/
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 
-# Environment variables and secrets
-.env
-.env.*
-!.env.example
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
 *.pem
-*.key
-*.p12
-*.pfx
 
-# Local databases
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# VaultPay - local databases and application data
+data/
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
-data/
 
-# Logs and temporary files
-*.log
+# VaultPay - secrets and private certificates
+*.key
+*.p12
+*.pfx
+
+# VaultPay - local logs and temporary files
 logs/
 tmp/
 temp/
 
-# Generated archives
+# VaultPay - generated submission archives
 *.zip
 *.tar.gz
 
-# Operating system and editor files
-.DS_Store
+# Windows and VS Code
 Thumbs.db
 .vscode/*
 !.vscode/extensions.json
+
