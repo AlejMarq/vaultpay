@@ -1,0 +1,40 @@
+# Node.js dependencies
+node_modules/
+
+# Next.js build files
+.next/
+out/
+build/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+
+# Generated archives
+*.zip
+*.tar.gz
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
