@@ -9,15 +9,21 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
+    "better-auth": "1.7.10",
+    "better-sqlite3": "13.0.3",
+    "jose": "6.2.12",
     "next": "16.4.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "eslint": "^9",
-    "eslint-config-next": "16.4.1"
+    "eslint-config-next": "16.4.1",
+    "selfsigned": "5.5.0"
   }
 }
