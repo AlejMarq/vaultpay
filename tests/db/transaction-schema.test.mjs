@@ -317,11 +317,22 @@ test('audit events: append-only with checked actor and event type', (t) => {
   const { db } = freshDb(t, 'transaction');
   const ins = db.prepare(`INSERT INTO audit_event (event_id, transfer_id, subject_wallet_id, actor_type, actor_id, event_type, occurred_at)
     VALUES (?, NULL, ?, ?, ?, ?, ${T0})`);
-  ins.run('aud_1', 'wal_alice', 'ops_user', 'ops_1', 'ops.account_view');
-  assertRejected(() => ins.run('aud_2', null, 'robot', 'x', 'ops.account_view'), 'CHECK');
-  assertRejected(() => ins.run('aud_3', null, 'service', 'x', 'Bad Event; DROP'), 'CHECK');
+  ins.run('aud_1', 'wal_alice', 'ops_user', 'ops_1', 'support.customer_view');
+  assertRejected(() => ins.run('aud_2', null, 'robot', 'x', 'support.customer_view'), 'CHECK');
+  assertRejected(() => ins.run('aud_3', null, 'service', 'x', 'Bad Event; DROP'), 'unknown audit event type');
   assertRejected(() => db.prepare("UPDATE audit_event SET actor_id = 'someone_else'").run(), 'append-only');
   assertRejected(() => db.prepare('DELETE FROM audit_event').run(), 'append-only');
+});
+
+test('audit events (v2): only registered event types; the type list is append-only', (t) => {
+  const { db } = freshDb(t, 'transaction');
+  const types = db.prepare('SELECT event_type FROM audit_event_type ORDER BY event_type').all().map((r) => r.event_type);
+  assert.deepEqual(types, ['support.customer_search', 'support.customer_view']);
+  const ins = db.prepare(`INSERT INTO audit_event (event_id, actor_type, actor_id, event_type, occurred_at) VALUES (?, 'ops_user', 'ops_1', ?, ${T0})`);
+  ins.run('aud_ok', 'support.customer_search');
+  assertRejected(() => ins.run('aud_new', 'ops.account_view'), 'unknown audit event type');
+  assertRejected(() => db.prepare("UPDATE audit_event_type SET description = 'x'").run(), 'append-only');
+  assertRejected(() => db.prepare('DELETE FROM audit_event_type').run(), 'append-only');
 });
 
 test('reconciliation results: append-only; a match has no difference', (t) => {

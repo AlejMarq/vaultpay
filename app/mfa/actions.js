@@ -10,7 +10,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
 import { getAuth } from '@/lib/server/auth';
-import { confirmEnrollment, mfaRateLimiter, startEnrollment, verifyChallenge } from '@/lib/server/mfa';
+import { confirmEnrollment, mfaRateLimiter, startEnrollment, totpReplayGuard, verifyChallenge } from '@/lib/server/mfa';
 import { assertSameOrigin } from '@/lib/server/origin';
 import { getViewer, readOnlyIdentityDb } from '@/lib/server/session';
 
@@ -28,7 +28,7 @@ export async function enrollmentAction(previousState, formData) {
   const limiter = mfaRateLimiter();
 
   if (formData.get('step') === 'confirm') {
-    const result = await confirmEnrollment({ auth, viewer, headers: requestHeaders, code: formData.get('code'), limiter });
+    const result = await confirmEnrollment({ auth, viewer, headers: requestHeaders, code: formData.get('code'), limiter, replayGuard: await totpReplayGuard() });
     if (!result.ok) return { step: 'confirm', ...display(previousState), error: result.error };
     // Better Auth has replaced the session with an MFA-verified one. The backup codes are
     // in this one response only; no page or action can show them again.
@@ -51,6 +51,7 @@ export async function challengeAction(_previousState, formData) {
     method,
     code: formData.get('code'),
     limiter: mfaRateLimiter(),
+    replayGuard: await totpReplayGuard(),
   });
   if (result.ok) redirect('/dashboard');
   return { method, error: result.error, restart: Boolean(result.restart) };

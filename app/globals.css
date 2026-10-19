@@ -172,6 +172,30 @@ a.button {
   word-break: break-all;
 }
 
+.page:not(.narrow) {
+  max-width: 960px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+table.transfers {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+table.transfers th,
+table.transfers td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
 .codes {
   list-style: none;
   display: grid;

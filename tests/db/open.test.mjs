@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import {
   checkIntegrity,
   createDatabase,
+  DATABASES,
   DB_ERROR_CODES as E,
   migrateDatabase,
   openDatabase,
@@ -153,14 +154,15 @@ test('an older schema is refused with a "run setup" error', (t) => {
 test('migrateDatabase upgrades an older schema, after which it opens', (t) => {
   const dataDir = tempDataDir(t);
   handBuilt(dataDir, 'transaction', (raw) => migrate(raw, 'transaction', { migrations: [], now: T0 }));
-  assert.deepEqual(migrateDatabase('transaction', { dataDir }), { from: 0, to: 1 });
+  const v = DATABASES.transaction.schemaVersion;
+  assert.deepEqual(migrateDatabase('transaction', { dataDir }), { from: 0, to: v });
   openDatabase('transaction', { dataDir }).close();
-  assert.deepEqual(migrateDatabase('transaction', { dataDir }), { from: 1, to: 1 });
+  assert.deepEqual(migrateDatabase('transaction', { dataDir }), { from: v, to: v });
 });
 
 test('a schema newer than the code is refused', (t) => {
   const dataDir = tempDataDir(t);
-  const future = [...loadMigrations('transaction'), { version: 2, name: 'future', sql: 'CREATE TABLE future_table (x INTEGER) STRICT;', sha256: 'f'.repeat(64) }];
+  const future = [...loadMigrations('transaction'), { version: DATABASES.transaction.schemaVersion + 1, name: 'future', sql: 'CREATE TABLE future_table (x INTEGER) STRICT;', sha256: 'f'.repeat(64) }];
   handBuilt(dataDir, 'transaction', (raw) => migrate(raw, 'transaction', { migrations: future, now: T0 }));
   assertDbError(() => openDatabase('transaction', { dataDir }), E.VERSION_NEW);
   assertDbError(() => migrateDatabase('transaction', { dataDir }), E.VERSION_NEW);
@@ -327,7 +329,7 @@ test('checkIntegrity reports foreign key violations', (t) => {
   tamper(dbFile(dataDir, 'transaction'), `
     PRAGMA foreign_keys = OFF;
     INSERT INTO audit_event (event_id, transfer_id, actor_type, actor_id, event_type, occurred_at)
-    VALUES ('aud_orphan', 'trf_missing', 'service', 'test', 'test.event', 1);`);
+    VALUES ('aud_orphan', 'trf_missing', 'service', 'test', 'support.customer_search', 1);`);
   const db = openTransactionDb({ dataDir });
   onCleanup(t, () => db.close());
   assertDbError(() => checkIntegrity(db), E.INTEGRITY);

@@ -39,6 +39,20 @@ Assignment 5" and "Known limitations" sections are built from it.
 | D24 | 2026-10-18 | Demo balances | Separate mock Core Banking database | **Approved** – Core Banking remains the source of truth (D7). Alice $500, Bob $250; AI to choose Carol and merchant | `data/db/mock-core-banking.db`: Carol $100.00 (funded but KYC pending, to demonstrate the KYC block), Demo Coffee $0.00 (receives only). Balances seeded once, never reset by setup; append-only `posting` table with unique idempotency key for later settlement. |
 | D25 | 2026-10-18 | Demo seeding (Section C) | Seed through Better Auth's sign-up API; fixed demo IDs; create only what is missing; stop on conflicting existing data | **Accepted** | Alice/Bob/Carol customers + wallets, support ops user, Demo Coffee. Seeding disables Better Auth's auto sign-in (no sessions created) and waits for Better Auth's schema check before closing the database. |
 
+| D26 | 2026-10-18 | Auth transport (Step 3) | Server Actions calling `auth.api` only; no public `/api/auth/*` routes | **Approved, conditional** on Better Auth's login, cookie, TOTP-challenge and backup-code flows working that way | Verified with Better Auth 1.7.10 (direct API probe, then real Server Action POSTs). Finding: direct `auth.api` calls skip Better Auth's Origin check, so CSRF protection is VaultPay's (D31). No self-registration. |
+| D27 | 2026-10-18 | Network exposure | `next dev`/`next start` listen on all interfaces by default | **Changed** – localhost only | `--hostname 127.0.0.1`; LAN addresses refuse connections (tested). 3F added a localhost `Host` allowlist against DNS rebinding (Problems, 2026-10-19). |
+| D28 | 2026-10-18 | Sessions | 30 min idle, refresh ≤ every 5 min, cookie cache off | **Approved** | Page renders read sessions without extending them; only Server Actions (incl. a throttled keep-alive) extend, so cookie and database row change together. Logout revokes the row. |
+| D29 | 2026-10-18 | Login rate limiting | Small bounded in-memory limiter keyed by client and normalized email | **Approved** – must not trust client-supplied forwarded headers | Windows of 5 (client+email) / 10 (email) / 30 (client) failures per 15 min; forwarded headers map only to `loopback` or a shared `unverified` key; unknown emails limited the same way; bounded at 5,000 keys. |
+| D30 | 2026-10-18 | MFA proof | Use `twoFactorEnabled` | **Changed** – the *current session* must have completed MFA | `session.mfaVerifiedAt`, set by Better Auth's session-create hook only for `/two-factor/verify-totp` and `/two-factor/verify-backup-code`; `input: false`; stripped from updates; DAL accepts it only within the session's own lifetime. |
+| D31 | 2026-10-18 | CSRF | Rely on Next.js's Server Action Origin check | **Changed** | Next lets a POST with *no* Origin through; every Server Action also calls `assertSameOrigin` (Origin present and equal to Host, Host localhost). Static test enforces it for all actions. |
+| D32 | 2026-10-18 | TOTP enrollment UX | `qrcode` 1.5.4 (exact) for the QR code; show backup codes once; no trusted-device option | **Approved** | QR + manual key after password re-entry; enrollment completes only after the first code; backup codes fetched with `viewBackupCodes` after verification and returned in that one response. |
+| D33 | 2026-10-19 | TOTP replay | Test whether Better Auth accepts a code twice; add a minimal defense if so | **My requirement** | Better Auth 1.7.10 accepted one code for enrollment and two further challenges. VaultPay claims each code (hashed, per user, atomic primary key) before Better Auth checks it; releases only its own claim (random token, once). Identity migrations 0002–0003. |
+| D34 | 2026-10-19 | Role access | `requireCustomer()` / `requireSupport()` server-side guards, both requiring MFA | **Approved** | Active customer / active `support_readonly` ops user; suspended, closed, disabled and role-less accounts → `/access-denied`; checked in every page and action and again in the data functions; nothing cached. |
+| D35 | 2026-10-19 | Support access and audit | Read-only support lookup; separate narrowly scoped append-only audit writer | **My requirement** – support connections must stay read-only | Support reads via read-only connections, masked contact data; `lib/server/audit.js` exposes one INSERT; transaction migration 0002 registers `support.customer_search` / `support.customer_view` and rejects other types; audit written before data is shown (fail closed). |
+| D36 | 2026-10-19 | KYC eligibility | Reusable `requireVerifiedCustomer()` for sending money | **My requirement** – re-checked by Step 5 immediately before creating a transfer | `lib/server/eligibility.js` reads customer, wallet and latest KYC from the database at call time (never the request-start snapshot); `/send` placeholder explains refusals. |
+| D37 | 2026-10-19 | Balances in the UI | – | **My requirement** – no direct mock Core Banking reads from Next.js | `/wallet` shows a "available after CBI" message; a test fails if app code opens the mock bank DB. |
+| D38 | 2026-10-18 | Build hygiene | – | (AI finding, accepted) | Runtime `data/` paths marked `turbopackIgnore` so build traces never list databases/keys/secrets (regression check in `test:http`); the DB/Better Auth getters refuse to run during `next build`. |
+
 ### D1 notes – why each process exists
 - **Next.js app** – required stack; hosts UI, API routes, Identity, Orchestrator & Ledger (+ background loop), Ops Support, Reconciliation & Audit.
 - **Fraud & Risk Check** – real outage for 272; sole holder of the signing key for 82; hostile scoring responses for 274.
@@ -71,6 +85,9 @@ Assignment 5" and "Known limitations" sections are built from it.
 | `SettlementRecord` | `settlement_attempt`, adds `attempt_no`, `idempotency_key` (sent to Core Banking) and `requested_at` (written before the request leaves) | D5; idempotent retries for 282 |
 | `Transfer.status` enum (unspecified) | `pending_risk → pending_settlement → settlement_in_flight → completed / failed`, plus `declined`, `expired`; transitions enforced by trigger | D5 enforced in the database: no expiry or re-screening once settlement was attempted |
 | Mock Core Banking balances | Separate mock Core Banking database (Step 2, later section) | D7 – Core Banking stays the source of truth for balances |
+| Auth.js sessions as Next.js Middleware on every request | Better Auth through Server Actions; Next.js 16 `proxy.js` only redirects when no cookie is present; all authorization in the server-side DAL | Next.js 16 renamed Middleware to Proxy and documents it as unsuitable for authorization (D26) |
+| Ops Support reports access to Reconciliation & Audit, which writes the audit event | A separate append-only audit writer inside the Next.js process (own connection, one INSERT) | Reconciliation & Audit runs inside Next.js (D1); separation is by connection and API, not process (D35) |
+| Money-moving routes require "MFA or step-up" | Every protected page requires that the *current session* completed TOTP or a backup code; no step-up yet | Simpler and stricter for the demo (D30) |
 
 ---
 
@@ -89,14 +106,24 @@ Assignment 5" and "Known limitations" sections are built from it.
 | 2026-10-18 | Section B: repeat-run test saw changed `*.db-wal` / `*.db-shm` files | SQLite keeps empty WAL/shared-memory files when the last connection is read-only. Database files themselves are byte-identical with unchanged modified times; tests ignore the runtime side files |
 | 2026-10-18 | Section C: second setup run logged `ERROR [Better Auth]: Could not validate the database schema` | Better Auth checks its schema in the background after start-up; seeding had already closed the connection. Seeding now awaits that check (`await (await auth.$context).checkSchema()`), which also fails setup if the schema is wrong |
 | 2026-10-18 | Section C: Better Auth's sign-up signs the new user in by default, so seeding would create sessions | Seeding passes `autoSignIn: false` (seeding only); test confirms 0 sessions after setup |
+| 2026-10-18 | Step 3: the AI's shell on the home PC started with the system-wide Node 24, not the pinned 22.23.3 | Every command run with the Node 22 folder first on `PATH`; documented in `docs/SETUP.md` ("activate Node 22 first") |
+| 2026-10-18 | 3A: build output tracing listed all of `data/` – including private keys and `*.env` – as files of `/api/health` (would be copied by a standalone/deployment build) | Runtime `data/` paths marked `turbopackIgnore`; `npm run test:http` fails if any trace lists runtime data (D38) |
+| 2026-10-18 | 3A probe: direct `auth.api` calls skip Better Auth's Origin check (a foreign Origin was accepted) | CSRF protection moved to VaultPay's own Server Action check (D31) |
+| 2026-10-18 | 3B: Next.js accepts a Server Action POST with no Origin header (logs a warning only) | `assertSameOrigin` refuses missing Origin; HTTP-tested for every action |
+| 2026-10-18 | 3B: with Cache Components, a page's `redirect()` arrives after the static shell – full page loads get 200 plus an in-page `NEXT_REDIRECT` instead of 307 | Accepted; no protected content is in the response (HTTP checks verify the redirect target and the absence of protected text). Only the proxy's "no cookie" redirect is a real 307 |
+| 2026-10-18 | 3C: `next build` opened the real identity DB – `getViewer()` started Better Auth before reading the request, so prerendering reached the database | Request read first; DB/Better Auth getters refuse to run during `next build` (verified by temporarily breaking the order: build fails) |
+| 2026-10-18 | 3C: backup codes would have been lost – after the enrollment action, Next re-renders in the same request using the original Cookie header (the revoked session) and redirected to `/login` | DAL builds the cookie header from `cookies()` (includes the new session); the setup page no longer redirects verified users |
+| 2026-10-18 | 3C: some HTTP checks matched text that was only in Next's Flight data (no-JS form POSTs deliver action state there, not in the rendered HTML) | HTTP checks read the returned action state explicitly; JS requirement recorded as a limitation |
+| 2026-10-19 | 3D: Better Auth 1.7.10 accepted the same TOTP code for enrollment and two separate sign-in challenges in one 30-second window | Replay guard (D33); unit + HTTP tests |
+| 2026-10-19 | 3E: a failed attempt's claim release matched on `claimed_at`; with two claims in the same millisecond (or a repeated release) it could delete another request's successful claim and reopen the code | Random claim token + one-shot release (identity migration 0003); regression test fails on the old code |
+| 2026-10-19 | 3F review: **DNS rebinding** – a site resolving its own name to 127.0.0.1 could send "same-origin" Server Actions (`Host` and `Origin` both `evil.example`) and sign in to the published demo accounts from a victim's browser | Localhost `Host` allowlist in every Server Action, in session resolution and in `/api/health`; HTTP test sends real requests with a foreign Host – all three checks fail without the fix |
+| 2026-10-19 | Test-only bugs found while writing HTTP checks: picking the page's first form (Sign out) instead of the lookup form; the rate-limit check locking Carol before her enrollment; random KYC timestamps making "later" records older | Forms selected by content; rate-limit check runs last; strictly increasing KYC timestamps (3 consecutive clean runs) |
 | 2026-10-18 | Smoke test section 6 prints `ERROR [Better Auth]: Database schema mismatch – Missing tables session, account, verification, twoFactor` | Not a failure: `betterAuth()` checks the schema when initialized, and the test initializes it on an empty database before running migrations. The following checks confirm the migrations created all five tables and all 7 checks passed. The app must run migrations in `npm run setup` before startup. Test left unchanged |
 
 ---
 
 ## 4. Security tests
 
-| Threat | Test | Result | Date |
-|--------|------|--------|------|
 Step 2 tests are groundwork at the database / certificate / key level; end-to-end tests
 follow once the services exist. All run with `npm test` (`node --test`).
 
@@ -112,6 +139,26 @@ follow once the services exist. All run with `npm test` (`node --test`).
 | 244 | `support@example.test` is a `support_readonly` ops user, cannot also be a customer; read-only DB connections rejected with `SQLITE_READONLY` | Pass | 2026-10-18 |
 | — (KYC baseline) | Carol seeded KYC pending; KYC history append-only; current status = newest record | Pass | 2026-10-18 |
 
+Step 3 tests (authentication and access control). Unit tests run with `npm test`; HTTP
+tests with `npm run test:http` against the built app on a temporary install, through real
+Server Action form POSTs.
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| CSRF | Foreign-Origin and missing-Origin POSTs rejected for login, logout, TOTP enrollment, TOTP verification and support lookup (HTTP); static check that every Server Action calls `assertSameOrigin` first | Pass | 2026-10-19 |
+| DNS rebinding | Login POST, session cookie and `/api/health` under `Host: evil.example` all refused (HTTP); fails without the fix | Pass | 2026-10-19 |
+| Credential guessing | Generic error for wrong password / unknown email / malformed input; rate limit blocks the 6th attempt even with the right password; spoofed `X-Forwarded-For` gains nothing | Pass | 2026-10-18 |
+| Sessions | Cookie `HttpOnly; SameSite=Lax; Path=/; Max-Age=1800`, host-only; logout revokes and clears; expired sessions refused and removed; page reads never extend a session | Pass | 2026-10-18 |
+| MFA bypass | Password-only sessions (incl. an enrolled account's older session) denied every protected page; `mfaVerifiedAt` cannot be set by a client, copied forward or used outside its session's lifetime; no trusted-device cookie | Pass | 2026-10-18 |
+| TOTP replay | Same code refused on a second challenge; enrollment code refused for sign-in; of two concurrent attempts exactly one succeeds; a failed attempt cannot release another's claim | Pass | 2026-10-19 |
+| Backup codes | Work once; reuse refused | Pass | 2026-10-18 |
+| 244 / support | Customers cannot reach `/support` (page or replayed action); support cannot reach `/wallet` or `/send`; support connections reject writes; lookups masked; ops accounts not findable | Pass | 2026-10-19 |
+| Audit trail | Every search and view recorded before data is returned (fail closed); writer only appends registered types; `audit_event` and `audit_event_type` reject UPDATE/DELETE | Pass | 2026-10-19 |
+| Data isolation (120) | Each customer sees only their own wallet and transfers; wallet id never taken from the request | Pass | 2026-10-19 |
+| Account status / KYC | Suspended/closed customers, disabled ops users, role-less accounts refused; pending/rejected KYC, frozen/closed/missing wallets refused for sending; changes apply on the next request; an old viewer snapshot never outlives a database change | Pass | 2026-10-19 |
+| D7 | No Next.js code opens the mock Core Banking database | Pass | 2026-10-19 |
+| Build hygiene | No runtime data in build traces; build fails if prerendering reaches the database | Pass | 2026-10-18 |
+
 ---
 
 ## 5. Phase status
@@ -120,6 +167,7 @@ follow once the services exist. All run with `npm test` (`node --test`).
 |-------|-------------|---------|-------|
 | 0 – Environment & scaffold | Environment verified; repo created and pushed; Next.js 16.4.1 starter runs; lint passes | Configured 2026-10-18: Node 22.23.3 / npm 10.9.9; repo cloned at `C:\dev\vaultpay`; `npm ci` succeeded; `npm run lint` passes; `npm run dev` starts and the starter page loads; git status clean. Phase 0 dependencies installed; `npm run smoke` 33/33 pass; `npm run lint` passes; `npm run build` succeeds; `/api/health` returns `{"status":"ok"}` under `npm run start` (see below) | Both computers configured; Node 22 pinned (D13). Remaining: on the work laptop, `npm ci`, `npm run smoke`, `npm run build` and the `/api/health` check |
 | 2 – Setup, databases, PKI, secrets, demo data | Pending (needs Phase 0 laptop steps, then `npm ci` + `npm run setup`) | Done 2026-10-18 (Sections A–C): `npm test` 123 tests – 122 pass, 0 fail, 1 skipped (file symlinks need Developer Mode); `npm run setup` on the existing install added only the mock Core Banking DB and demo data (keys and certificates kept); repeat run kept everything; `npm run setup:check` 11/11 PASS; `NODE_ENV=production` refused; lint, build, smoke test pass | Not yet: login/TOTP UI, transfer endpoints, Fraud/Settlement/CBI services (later steps). `/api/health` still uses an in-memory DB |
+| 3 – Authentication, MFA, roles, KYC | Pending (`git pull`, `npm ci`, `npm run setup` migrates to identity v3 / transaction v2) | Done 2026-10-19 (Sections 3A–3F): `npm test` 218 tests – 217 pass, 0 fail, 1 skipped; `npm run test:http` 134/134; lint, build, smoke, setup, `setup:check` 11/11 PASS; production audit 0 vulnerabilities | Next: Step 4 (Core Banking Integration, balances) and Step 5 (transfers, which must call `requireVerifiedCustomer()` again just before creating a transfer) |
 
 ### Phase 0 dependency verification – home PC, 2026-10-18
 
@@ -153,3 +201,39 @@ Node.js 22.23.3, npm 10.9.9. Installed with `--save-exact`:
 | C – demo data + docs | Mock Core Banking DB, seeded demo users/customers/KYC/wallets/merchant/balances, `docs/SETUP.md`, README setup section | See below |
 
 Final Section C results are recorded in the Phase status row and in the Problems table.
+
+### Step 3 – authentication, MFA, roles and KYC (home PC, 2026-10-18 – 2026-10-19)
+
+| Section | Delivered | Verified (unit / HTTP) |
+|---|---|---|
+| 3A – app wiring | Next.js connected to the identity DB and Better Auth; safe `web.env` loader; `/api/health` on the real databases (status only); localhost binding; security headers; build-trace fix | 140 pass / 1 skip; HTTP checks introduced |
+| 3B – login and sessions | `/login` Server Action, generic errors, 30-min sessions, logout/revocation, rate limiter, DAL, convenience proxy, explicit Origin check | 167 / 1 skip; 63 HTTP |
+| 3C – TOTP MFA | First-login enrollment (password, QR + key, first code, backup codes once), sign-in challenge, backup codes, `mfaVerifiedAt` session marker, MFA rate limits, build guard | 180 / 1 skip; 96 HTTP |
+| 3D – roles | TOTP replay guard; `requireCustomer` / `requireSupport`; `/wallet`, `/support`, `/access-denied`; audit writer and event types; data isolation | 204 / 1 skip; 119 HTTP |
+| 3E – KYC eligibility | `requireVerifiedCustomer()` / `lib/server/eligibility.js`; `/send` placeholder; claim-token fix | 212 / 1 skip; 131 HTTP |
+| 3F – review and docs | DNS-rebinding fix; static security-invariant tests; `docs/SETUP.md`, README and this log updated | **217 / 1 skip; 134 HTTP** |
+
+**Known limitations after Step 3**
+
+- Plain HTTP on localhost: cookies are not `Secure`, no HSTS, no nonce-based CSP yet.
+- Multi-step pages (enrollment, MFA challenge, support lookup) need JavaScript: action
+  results arrive in Next's Flight data.
+- Protected pages redirect with 200 + in-page `NEXT_REDIRECT` on full page loads (Cache
+  Components); no protected content is sent.
+- Rate limits are in memory (reset on restart, per process); anyone local who knows a
+  published demo password can lock that account for 15 minutes or be first to enrol its TOTP.
+- The challenge rate-limit key reads Better Auth's `verification` table (internal format).
+- The audit writer is narrow by API and triggers, not by database permissions (SQLite has
+  none, D3); audit events do not record the searched email.
+- A customer with several wallets: the DAL shows the oldest, eligibility prefers an active
+  one – Step 5 must take the source wallet explicitly and check ownership and status.
+- No KYC approval screen, no password reset, email verification or self-registration.
+- One test is skipped on this PC: file symlinks need Windows Developer Mode.
+
+**Next steps**
+
+- Work laptop: `git pull`, `npm ci`, `npm run setup` (migrates to identity v3 /
+  transaction v2), `npm test`, `npm run build`, `npm run test:http`.
+- Step 4: Core Banking Integration over mTLS (balances on `/wallet`).
+- Step 5: transfers – call `requireVerifiedCustomer()` immediately before creating each
+  transfer, take the source wallet explicitly, add the transfer audit event types.

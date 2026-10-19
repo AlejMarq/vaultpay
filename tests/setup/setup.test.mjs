@@ -147,7 +147,7 @@ test('an older database schema is backed up before being migrated', async (t) =>
 
   const report = await runSetup({ dataDir });
   const line = report.created.find((c) => c.startsWith('transaction database migrated'));
-  assert.match(line, /v0 → v1 \(backup: backups[\\/].+[\\/]transaction\.db\)/);
+  assert.match(line, /v0 → v2 \(backup: backups[\\/].+[\\/]transaction\.db\)/);
   const backup = path.join(dataDir, line.match(/backup: (.+)\)$/)[1]);
   const copy = new Database(backup, { readonly: true });
   assert.equal(copy.prepare('SELECT schema_version FROM db_meta').get().schema_version, 0);

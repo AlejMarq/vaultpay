@@ -20,5 +20,5 @@ export function proxy(request) {
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/mfa/:path*'],
+  matcher: ['/dashboard/:path*', '/mfa/:path*', '/wallet/:path*', '/support/:path*', '/send/:path*'],
 };

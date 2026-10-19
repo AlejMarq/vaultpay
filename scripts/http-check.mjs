@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,13 +21,15 @@ import Database from 'better-sqlite3';
 
 import { totp } from '../tests/helpers/totp.mjs';
 
-import { DEMO_CUSTOMERS } from './setup/demo-data.mjs';
+import { DEMO_CUSTOMERS, DEMO_OPS_USERS } from './setup/demo-data.mjs';
 import { runSetup } from './setup/run.mjs';
 
 const PORT = 3999;
 const root = process.cwd();
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const [alice, bob, carol] = DEMO_CUSTOMERS;
+const [support] = DEMO_OPS_USERS;
+const extraConnections = []; // closed in `finally`, so the temporary install can be deleted
 const GENERIC = 'Incorrect email or password.';
 let failures = 0;
 
@@ -106,10 +109,11 @@ function tryConnect(host) {
 
 // Builds the multipart body a browser submits for the n-th <form> on a page: its hidden
 // Server Action fields ($ACTION_REF_*, $ACTION_*:*, $ACTION_KEY …) plus `fields`.
-function formFrom(html, fields = {}, index = 0) {
+// `which`: the form's position on the page, or a string the form must contain.
+function formFrom(html, fields = {}, which = 0) {
   const forms = [...html.matchAll(/<form[\s\S]*?<\/form>/g)].map((m) => m[0]);
-  const form = forms[index];
-  if (!form) throw new Error(`no form #${index} on page`);
+  const form = typeof which === 'string' ? forms.find((f) => f.includes(which)) : forms[which];
+  if (!form) throw new Error(`no form ${JSON.stringify(which)} on page`);
   const data = new FormData();
   for (const [tag] of form.matchAll(/<input[^>]*type="hidden"[^>]*>/g)) {
     const name = tag.match(/name="([^"]*)"/)[1];
@@ -158,7 +162,7 @@ async function expectRedirect(name, res, to, mustNotContain = []) {
 }
 
 // Text that only appears when signed-in content is rendered.
-const PROTECTED_TEXT = ['Signed in as', 'Welcome,', 'Session expires'];
+const PROTECTED_TEXT = ['Signed in as', 'Welcome,', 'Session expires', 'wal_demo', 'Recent transfers', 'Look up customer'];
 
 // A minimal browser cookie jar: applies Set-Cookie (Max-Age=0 / past Expires deletes).
 function cookieJar() {
@@ -305,20 +309,11 @@ try {
   writer.close();
   await expectRedirect('an expired session redirects to /login, nothing rendered', await get('/mfa', bobCookie), '/login', PROTECTED_TEXT);
 
-  console.log('\nRate limiting');
-  for (let i = 0; i < 5; i += 1) await loginAs(carol, `wrong-${i}`);
-  const limited = await loginAs(carol);
-  const limitedHtml = await limited.text();
-  check('6th attempt is blocked even with the right password',
-    limited.status === 200 && /^Too many sign-in attempts/.test(actionState(limitedHtml)?.error ?? '') && !sessionSetCookie(limited), JSON.stringify(actionState(limitedHtml)));
-
   // -------------------------------------------------------------------------
   // TOTP enrollment and verification through the real Server Actions.
   const twoFactorRows = () => identity.prepare('SELECT count(*) AS n FROM twoFactor').get().n;
   const twoFactorEnabled = (email) => identity.prepare('SELECT twoFactorEnabled AS e FROM "user" WHERE email = ?').get(email).e === 1;
   const twoFactorValue = (email) => JSON.stringify(identity.prepare('SELECT twoFactorEnabled AS e, typeof(twoFactorEnabled) AS t FROM "user" WHERE email = ?').get(email));
-  // React separates adjacent text nodes with <!-- -->, e.g. "Welcome, <!-- -->Alice Demo".
-  const welcomes = (html, name) => html.replaceAll('<!-- -->', '').includes(`Welcome, ${name}`);
   const browserLogin = async (user) => {
     const browser = cookieJar();
     const page = await (await get('/login')).text();
@@ -362,8 +357,9 @@ try {
   check('correct code: enrollment complete', step2.status === 200 && step2State?.step === 'done' && twoFactorEnabled(alice.email), `status ${step2.status} ${step2.headers.get('location')}, ${JSON.stringify(step2State?.step)} ${twoFactorValue(alice.email)}`);
   check('10 backup codes returned once, after verification', backupCodes.length === 10 && backupCodes.every((c) => typeof c === 'string' && c.length >= 8), String(backupCodes.length));
   check('a new session cookie replaced the password-only one', a1.header() !== passwordOnlyCookie && a1.has('better-auth.session_token'));
-  const dash1 = await get('/dashboard', a1.header());
-  check('/dashboard is available to the MFA-verified session', dash1.status === 200 && welcomes(await dash1.text(), 'Alice Demo'), String(dash1.status));
+  await expectRedirect('/dashboard forwards the MFA-verified customer to /wallet', await get('/dashboard', a1.header()), '/wallet');
+  const wallet1 = await get('/wallet', a1.header());
+  check('/wallet is available to the MFA-verified session', wallet1.status === 200 && (await wallet1.text()).includes('wal_demo_alice'), String(wallet1.status));
   await expectRedirect('the old password-only session was revoked', await get('/dashboard', passwordOnlyCookie), '/login', PROTECTED_TEXT);
   const setupAgain = await get('/mfa/setup', a1.header());
   const setupAgainHtml = await setupAgain.text();
@@ -374,9 +370,9 @@ try {
 
   const logoutFrom = async (browser, page) => {
     const html = await (await get(page, browser.header())).text();
-    return browser.apply(await post(page, formFrom(html), { cookie: browser.header() }));
+    return browser.apply(await post(page, formFrom(html, {}, 'Sign out'), { cookie: browser.header() }));
   };
-  await logoutFrom(a1, '/dashboard');
+  await logoutFrom(a1, '/wallet');
   await expectRedirect('after logout the MFA-verified session is gone', await get('/dashboard', a1.header()), '/login', PROTECTED_TEXT);
 
   console.log('\nMFA on later sign-ins');
@@ -395,34 +391,243 @@ try {
   const badTotpState = actionState(await badTotp.text());
   check('wrong TOTP code rejected, no session', /^That code is not valid/.test(badTotpState?.error ?? '') && !sessionSetCookie(badTotp), JSON.stringify(badTotpState));
 
-  const goodTotp = a2.apply(await post('/mfa/verify', formFrom(verifyHtml, { code: totp(manualKey, Date.now() + 30_000) }, 0), { cookie: a2.header() }));
+  const challengeCode = totp(manualKey, Date.now() + 30_000);
+  const goodTotp = a2.apply(await post('/mfa/verify', formFrom(verifyHtml, { code: challengeCode }, 0), { cookie: a2.header() }));
   check('correct TOTP: 303 to /dashboard with a new session', goodTotp.status === 303 && goodTotp.headers.get('location') === '/dashboard' && Boolean(sessionSetCookie(goodTotp)), `${goodTotp.status} ${goodTotp.headers.get('location')}`);
   check('no trusted-device cookie issued', !goodTotp.headers.getSetCookie().some((c) => c.startsWith('better-auth.trust_device')));
   check('session row marked mfaVerifiedAt', identity.prepare('SELECT count(*) AS n FROM session WHERE mfaVerifiedAt IS NOT NULL').get().n === 1);
-  const dash2 = await get('/dashboard', a2.header());
-  check('/dashboard available after the challenge', dash2.status === 200 && welcomes(await dash2.text(), 'Alice Demo'), String(dash2.status));
-  await logoutFrom(a2, '/dashboard');
+  const wallet2 = await get('/wallet', a2.header());
+  check('/wallet available after the challenge', wallet2.status === 200 && (await wallet2.text()).includes('wal_demo_alice'), String(wallet2.status));
+  await logoutFrom(a2, '/wallet');
+
+  console.log('\nTOTP replay');
+  const { browser: aReplay } = await browserLogin(alice);
+  const replayHtml = await (await get('/mfa/verify', aReplay.header())).text();
+  const replay = await post('/mfa/verify', formFrom(replayHtml, { code: challengeCode }, 0), { cookie: aReplay.header() });
+  const replayState = actionState(await replay.text());
+  check('the same TOTP code is refused for a second sign-in challenge', /^That code is not valid/.test(replayState?.error ?? '') && !sessionSetCookie(replay), JSON.stringify(replayState));
+  const enrollReplay = await post('/mfa/verify', formFrom(replayHtml, { code: totp(manualKey) }, 0), { cookie: aReplay.header() });
+  check('the enrollment code cannot be used for a sign-in either', !sessionSetCookie(enrollReplay), String(enrollReplay.status));
 
   console.log('\nBackup codes');
   const { browser: a3 } = await browserLogin(alice);
   const verifyHtml3 = await (await get('/mfa/verify', a3.header())).text();
   const viaBackup = a3.apply(await post('/mfa/verify', formFrom(verifyHtml3, { code: backupCodes[0] }, 1), { cookie: a3.header() }));
   check('a backup code completes sign-in', viaBackup.status === 303 && viaBackup.headers.get('location') === '/dashboard', `${viaBackup.status} ${viaBackup.headers.get('location')}`);
-  await logoutFrom(a3, '/dashboard');
+  await logoutFrom(a3, '/wallet');
   const { browser: a4 } = await browserLogin(alice);
   const verifyHtml4 = await (await get('/mfa/verify', a4.header())).text();
   const reused = await post('/mfa/verify', formFrom(verifyHtml4, { code: backupCodes[0] }, 1), { cookie: a4.header() });
   const reusedState = actionState(await reused.text());
   check('the same backup code is refused the second time', /not valid or has already been used/.test(reusedState?.error ?? '') && !sessionSetCookie(reused), JSON.stringify(reusedState));
+
+  // -------------------------------------------------------------------------
+  // Section 3D: customer and read-only support access.
+  const writeDb = (name, fn) => {
+    const db = new Database(path.join(dataDir, 'db', `${name}.db`));
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  };
+  writeDb('transaction', (db) => {
+    const ins = db.prepare(`INSERT INTO transfer (transfer_id, sender_wallet_id, payee_type, payee_id, amount_cents, idempotency_key, status, pending_expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending_risk', ?, ?, ?)`);
+    const t0 = Date.now() - 60_000;
+    [['trf_a_to_b', 'wal_demo_alice', 'wallet', 'wal_demo_bob', 1250], ['trf_b_to_a', 'wal_demo_bob', 'wallet', 'wal_demo_alice', 500],
+      ['trf_c_to_b', 'wal_demo_carol', 'wallet', 'wal_demo_bob', 700], ['trf_c_to_m', 'wal_demo_carol', 'merchant', 'mer_demo_coffee', 300]]
+      .forEach(([id, from, type, to, amount], i) => ins.run(id, from, type, to, amount, `idem-${id}`, t0 + 600_000, t0 + i, t0 + i));
+  });
+  const transactionRo = new Database(path.join(dataDir, 'db', 'transaction.db'), { readonly: true, fileMustExist: true });
+  extraConnections.push(transactionRo);
+  const auditRows = () => transactionRo.prepare('SELECT actor_id, event_type, subject_wallet_id FROM audit_event ORDER BY occurred_at, rowid').all();
+
+  const enrollViaHttp = async (user) => {
+    const { browser } = await browserLogin(user);
+    const html = await (await get('/mfa/setup', browser.header())).text();
+    const s1 = actionState(await (await post('/mfa/setup', formFrom(html, { password: user.password }), { cookie: browser.header() })).text());
+    const key = s1.manualKey.replaceAll(' ', '');
+    browser.apply(await post('/mfa/setup', formFrom(html, { step: 'confirm', code: totp(key) }), { cookie: browser.header() }));
+    return browser;
+  };
+
+  console.log('\nCustomer wallet (own data only)');
+  const { browser: aw } = await browserLogin(alice);
+  const awVerify = await (await get('/mfa/verify', aw.header())).text();
+  aw.apply(await post('/mfa/verify', formFrom(awVerify, { code: backupCodes[1] }, 1), { cookie: aw.header() }));
+  const walletPage = await get('/wallet', aw.header());
+  const walletHtml = (await walletPage.text()).replaceAll('<!-- -->', '');
+  check('/wallet shows the customer\'s identity, wallet and KYC status',
+    walletPage.status === 200 && walletHtml.includes('Alice Demo') && walletHtml.includes('wal_demo_alice') && walletHtml.includes('Approved'), String(walletPage.status));
+  check('/wallet lists the customer\'s own transfers', walletHtml.includes('trf_a_to_b') && walletHtml.includes('trf_b_to_a'));
+  const othersData = ['trf_c_to_b', 'trf_c_to_m', 'wal_demo_carol', 'Carol Demo'].filter((s) => walletHtml.includes(s));
+  check('/wallet shows nothing from other customers', othersData.length === 0, othersData.join(', '));
+  check('/wallet shows no balance – only the CBI message', walletHtml.includes('Balance retrieval will be available after Core Banking Integration') && !walletHtml.includes('$500.00') && !walletHtml.includes('MCB-'));
+  await expectRedirect('a customer cannot open /support', await get('/support', aw.header()), '/access-denied', ['Look up customer', 'Customer support (read-only)']);
+
+  console.log('\nRead-only support');
+  const sw = await enrollViaHttp(support);
+  await expectRedirect('/dashboard forwards the support user to /support', await get('/dashboard', sw.header()), '/support');
+  const supportPage = await get('/support', sw.header());
+  const supportHtml = await supportPage.text();
+  check('/support is available to the MFA-verified support user', supportPage.status === 200 && supportHtml.includes('Customer support (read-only)') && supportHtml.includes('Look up customer'), String(supportPage.status));
+  await expectRedirect('support cannot open /wallet', await get('/wallet', sw.header()), '/access-denied', ['Recent transfers']);
+
+  const auditBefore = auditRows().length;
+  const lookup = await post('/support', formFrom(supportHtml, { email: alice.email }, 'name="email"'), { cookie: sw.header() });
+  const lookupState = actionState(await lookup.text());
+  const found = lookupState?.result;
+  check('lookup finds the customer by email', found?.found === true && found.customer.customerId === 'cus_demo_alice', JSON.stringify(found)?.slice(0, 200));
+  check('contact details are masked', found?.customer.maskedEmail === 'a***e@example.test' && found?.customer.maskedPhone === '+•-•••-••01' && !JSON.stringify(found).includes(alice.email));
+  check('wallet, KYC status and transfers are shown', found?.wallet?.walletId === 'wal_demo_alice' && found?.customer.kycStatus === 'approved'
+    && JSON.stringify(found?.transfers.map((t) => t.transferId)) === '["trf_b_to_a","trf_a_to_b"]');
+  const newAudit = auditRows().slice(auditBefore);
+  check('the search and the view are both in the audit trail', JSON.stringify(newAudit) === JSON.stringify([
+    { actor_id: 'ops_demo_support', event_type: 'support.customer_search', subject_wallet_id: null },
+    { actor_id: 'ops_demo_support', event_type: 'support.customer_view', subject_wallet_id: 'wal_demo_alice' },
+  ]), JSON.stringify(newAudit));
+
+  const auditMid = auditRows().length;
+  const foreignLookup = await post('/support', formFrom(supportHtml, { email: alice.email }, 'name="email"'), { origin: 'http://evil.example', cookie: sw.header() });
+  const noOriginLookup = await post('/support', formFrom(supportHtml, { email: alice.email }, 'name="email"'), { origin: null, cookie: sw.header() });
+  check('foreign-Origin and missing-Origin lookups are rejected and leave no audit record',
+    foreignLookup.status >= 400 && noOriginLookup.status >= 400 && auditRows().length === auditMid, `${foreignLookup.status} / ${noOriginLookup.status}`);
+  const customerReplay = await post('/support', formFrom(supportHtml, { email: bob.email }, 'name="email"'), { cookie: aw.header() });
+  const customerReplayRedirect = await redirectOf(customerReplay);
+  check('a customer replaying the support lookup action is refused (server-side check)',
+    customerReplayRedirect.to === '/access-denied' && !customerReplayRedirect.html.includes('cus_demo_bob') && auditRows().length === auditMid,
+    `${customerReplay.status} ${customerReplayRedirect.to}`);
+  const notFound = actionState(await (await post('/support', formFrom(supportHtml, { email: 'support@example.test' }, 'name="email"'), { cookie: sw.header() })).text());
+  check('ops accounts cannot be looked up ("not found")', notFound?.result?.found === false, JSON.stringify(notFound));
+
+  console.log('\nMFA and account status enforcement');
+  const { browser: bw } = await browserLogin(bob);
+  await expectRedirect('password-only customer: /wallet → /mfa', await get('/wallet', bw.header()), '/mfa', PROTECTED_TEXT);
+  await expectRedirect('password-only customer: /support → /mfa', await get('/support', bw.header()), '/mfa', PROTECTED_TEXT);
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'suspended' WHERE customer_id = 'cus_demo_alice'").run());
+  await expectRedirect('a suspended customer is refused on the next request', await get('/wallet', aw.header()), '/access-denied', PROTECTED_TEXT);
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'active' WHERE customer_id = 'cus_demo_alice'").run());
+  writeDb('identity', (db) => db.prepare("UPDATE ops_user SET status = 'disabled' WHERE ops_user_id = 'ops_demo_support'").run());
+  await expectRedirect('a disabled ops user is refused on the next request', await get('/support', sw.header()), '/access-denied', PROTECTED_TEXT);
+  const disabledLookup = await post('/support', formFrom(supportHtml, { email: alice.email }, 'name="email"'), { cookie: sw.header() });
+  check('a disabled ops user\'s lookup action is refused', (await redirectOf(disabledLookup)).to === '/access-denied' && auditRows().length === auditMid + 1);
+  writeDb('identity', (db) => db.prepare("UPDATE ops_user SET status = 'active' WHERE ops_user_id = 'ops_demo_support'").run());
+
+  // -------------------------------------------------------------------------
+  // Section 3E: KYC and wallet eligibility for sending money.
+  const sendState = async (browser) => {
+    const res = await get('/send', browser.header());
+    if (res.status !== 200) return { status: res.status, redirect: (await redirectOf(res)).to };
+    const html = (await res.text()).replaceAll('<!-- -->', '');
+    return {
+      status: 200,
+      eligibility: html.match(/data-eligibility="(\w+)"/)?.[1] ?? null,
+      reasons: [...html.matchAll(/data-reason="(\w+)"/g)].map((m) => m[1]),
+      forms: (html.match(/<form/g) ?? []).length,
+      html,
+    };
+  };
+  // Each record strictly newer than the last: the newest KYC record is the current status.
+  let kycAt = Date.now() + 1000;
+  const addKyc = (status) => writeDb('identity', (db) => {
+    const at = (kycAt += 1000);
+    db.prepare(`INSERT INTO kyc_verification (verification_id, customer_id, status, verification_ref, verified_at, created_at)
+      VALUES (?, 'cus_demo_carol', ?, 'http-check', ?, ?)`).run(`kyc_http_${status}_${at}`, status, status === 'pending' ? null : at, at);
+  });
+
+  // Content only the /send page body renders (its static <title> is not data).
+  const SEND_CONTENT = ['data-eligibility', 'Transfers will be enabled', 'Sending money is unavailable'];
+
+  console.log('\nSend money: eligibility (3E)');
+  check('/wallet links to /send', (await (await get('/wallet', aw.header())).text()).includes('href="/send"'));
+  const aliceSend = await sendState(aw);
+  check('Alice is eligible: placeholder for Step 5', aliceSend.eligibility === 'eligible' && aliceSend.html.includes('Transfers will be enabled in Step 5'), JSON.stringify({ ...aliceSend, html: undefined }));
+  check('no transfer submission is exposed (only the sign-out form)', aliceSend.forms === 1 && !/name="(amount|payee|recipient)/.test(aliceSend.html), String(aliceSend.forms));
+
+  const cw = await enrollViaHttp(carol);
+  const carolPending = await sendState(cw);
+  check('Carol (KYC pending) is told transfers are unavailable until KYC is approved',
+    carolPending.eligibility === 'ineligible' && JSON.stringify(carolPending.reasons) === '["kyc_pending"]' && carolPending.html.includes('pending'), JSON.stringify(carolPending.reasons));
+  addKyc('approved');
+  const carolApproved = await sendState(cw);
+  check('a new approved KYC record lets Carol through on the next request', carolApproved.eligibility === 'eligible', JSON.stringify(carolApproved.reasons));
+  addKyc('rejected');
+  const carolRejected = await sendState(cw);
+  check('a later rejected KYC record blocks her again', carolRejected.eligibility === 'ineligible' && JSON.stringify(carolRejected.reasons) === '["kyc_rejected"]', JSON.stringify(carolRejected.reasons));
+
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'frozen' WHERE wallet_id = 'wal_demo_alice'").run());
+  const frozen = await sendState(aw);
+  check('a frozen wallet is refused', frozen.eligibility === 'ineligible' && JSON.stringify(frozen.reasons) === '["wallet_frozen"]', JSON.stringify(frozen.reasons));
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'active' WHERE wallet_id = 'wal_demo_alice'").run());
+  check('unfreezing applies on the next request (nothing cached)', (await sendState(aw)).eligibility === 'eligible');
+
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'suspended' WHERE customer_id = 'cus_demo_alice'").run());
+  await expectRedirect('a suspended customer cannot open /send', await get('/send', aw.header()), '/access-denied', SEND_CONTENT);
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'active' WHERE customer_id = 'cus_demo_alice'").run());
+
+  await expectRedirect('support cannot open /send', await get('/send', sw.header()), '/access-denied', SEND_CONTENT);
+  await expectRedirect('a password-only customer: /send → /mfa', await get('/send', bw.header()), '/mfa', SEND_CONTENT);
+  await expectRedirect('signed out: /send → /login', await get('/send'), '/login');
+
+  // -------------------------------------------------------------------------
+  // DNS rebinding: a request reaching 127.0.0.1 under a foreign Host name (fetch cannot
+  // override Host, so these use node:http directly).
+  const rawRequest = (method, p, { host, headers = {}, form } = {}) => new Promise((resolve, reject) => {
+    const send = async () => {
+      let body;
+      const h = { host, ...headers };
+      if (form) {
+        const r = new Request('http://x/', { method: 'POST', body: form });
+        body = Buffer.from(await r.arrayBuffer());
+        h['content-type'] = r.headers.get('content-type');
+        h['content-length'] = String(body.length);
+      }
+      const req = http.request({ host: '127.0.0.1', port: PORT, method, path: p, headers: h }, (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { text += c; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    };
+    send().catch(reject);
+  });
+
+  console.log('\nDNS rebinding (foreign Host header)');
+  const evilHost = `evil.example:${PORT}`;
+  const rebHealth = await rawRequest('GET', '/api/health', { host: evilHost });
+  check('/api/health refuses a foreign Host (403, no details)', rebHealth.status === 403 && rebHealth.text === '{"status":"forbidden"}', `${rebHealth.status} ${rebHealth.text}`);
+  const rebLoginPage = await (await get('/login')).text();
+  const rebLogin = await rawRequest('POST', '/login', {
+    host: evilHost, headers: { origin: `http://${evilHost}` }, form: formFrom(rebLoginPage, { email: bob.email, password: bob.password }),
+  });
+  const rebSetCookie = [].concat(rebLogin.headers['set-cookie'] ?? []).find((c) => c.startsWith('better-auth.session_token='));
+  check('a "same-origin" login POST under a foreign Host is refused, no session', rebLogin.status >= 400 && !rebSetCookie, `${rebLogin.status}`);
+  const rebWallet = await rawRequest('GET', '/wallet', { host: evilHost, headers: { cookie: aw.header() } });
+  const rebWalletTarget = rebWallet.status >= 300 && rebWallet.status < 400 ? new URL(rebWallet.headers.location, base).pathname : rebWallet.text.match(/NEXT_REDIRECT;(?:replace|push);([^;"\\]+);/)?.[1];
+  check('a valid session cookie under a foreign Host resolves to no session (nothing rendered)',
+    rebWalletTarget === '/login' && !rebWallet.text.includes('wal_demo_alice'), `${rebWallet.status} ${rebWalletTarget}`);
+
+  // Last, because it locks Carol's sign-in for 15 minutes in this server process.
+  console.log('\nRate limiting');
+  for (let i = 0; i < 5; i += 1) await loginAs(carol, `wrong-${i}`);
+  const limited = await loginAs(carol);
+  const limitedHtml = await limited.text();
+  check('6th attempt is blocked even with the right password',
+    limited.status === 200 && /^Too many sign-in attempts/.test(actionState(limitedHtml)?.error ?? '') && !sessionSetCookie(limited), JSON.stringify(actionState(limitedHtml)));
 } catch (err) {
   failures += 1;
   console.log(`  FAIL  ${err.stack ?? err.message}`);
 } finally {
+  for (const db of extraConnections) db.close();
   identity.close();
   server.kill();
   await exited;
   fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 
+if (failures > 0) console.log(`\n--- server log (last 4000 characters) ---\n${output.slice(-4000)}`);
 console.log(failures === 0 ? '\nALL HTTP CHECKS PASSED' : `\n${failures} HTTP CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

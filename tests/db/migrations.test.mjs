@@ -50,7 +50,8 @@ for (const name of NAMES) {
     onCleanup(t, () => db.close());
     migrate(db, name, { now: T0 });
     const before = db.prepare('SELECT sql FROM sqlite_schema ORDER BY name').all();
-    assert.deepEqual(migrate(db, name, { now: T0 + 1 }), { from: 1, to: 1 });
+    const v = DATABASES[name].schemaVersion;
+    assert.deepEqual(migrate(db, name, { now: T0 + 1 }), { from: v, to: v });
     assert.deepEqual(db.prepare('SELECT sql FROM sqlite_schema ORDER BY name').all(), before);
   });
 

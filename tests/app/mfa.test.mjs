@@ -10,6 +10,7 @@ import {
   INCORRECT_PASSWORD, INVALID_BACKUP_CODE, INVALID_CODE, startEnrollment, verifyChallenge,
 } from '../../lib/server/mfa.js';
 import { createLoginRateLimiter, createMfaRateLimiter } from '../../lib/server/rate-limit.js';
+import { createTotpReplayGuard } from '../../lib/server/totp-replay.js';
 import { DEMO_CUSTOMERS, DEMO_OPS_USERS } from '../../scripts/setup/demo-data.mjs';
 import { onCleanup } from '../helpers/db.mjs';
 import { freshInstall } from '../helpers/setup.mjs';
@@ -43,6 +44,7 @@ async function setup(t) {
   onCleanup(t, () => { ro.close(); close(); });
   const mfaLimiter = createMfaRateLimiter();
   const loginLimiter = createLoginRateLimiter();
+  const replayGuard = createTotpReplayGuard(db);
 
   const login = async (user, browser = jar()) => {
     const r = await attemptLogin({ auth, limiter: loginLimiter, headers: browser.headers(), email: user.email, password: user.password });
@@ -56,10 +58,10 @@ async function setup(t) {
   const enroll = async (user) => {
     const { browser } = await login(user);
     const viewer = await viewerOf(browser);
-    const started = await startEnrollment({ auth, viewer, headers: browser.headers(), password: user.password, limiter: mfaLimiter });
+    const started = await startEnrollment({ auth, viewer, headers: browser.headers(), password: user.password, limiter: mfaLimiter, replayGuard });
     assert.equal(started.ok, true, started.error);
     const secret = started.manualKey.replaceAll(' ', '');
-    const done = await confirmEnrollment({ auth, viewer, headers: browser.headers(), code: totp(secret), limiter: mfaLimiter });
+    const done = await confirmEnrollment({ auth, viewer, headers: browser.headers(), code: totp(secret), limiter: mfaLimiter, replayGuard });
     assert.equal(done.ok, true, done.error);
     browser.apply(done.headers);
     return { browser, secret, backupCodes: done.backupCodes, started };
@@ -67,12 +69,12 @@ async function setup(t) {
 
   const challenge = async (user, method, code, browser) => {
     const b = browser ?? (await login(user)).browser;
-    const r = await verifyChallenge({ auth, identityDb: ro, headers: b.headers(), method, code, limiter: mfaLimiter });
+    const r = await verifyChallenge({ auth, identityDb: ro, headers: b.headers(), method, code, limiter: mfaLimiter, replayGuard });
     if (r.ok) b.apply(r.headers);
     return { ...r, browser: b };
   };
 
-  return { auth, db, ro, login, viewerOf, enroll, challenge, mfaLimiter };
+  return { auth, db, ro, login, viewerOf, enroll, challenge, mfaLimiter, replayGuard };
 }
 
 const sessions = (db, userEmail) => db.prepare(`SELECT s.id, s.mfaVerifiedAt FROM session s JOIN "user" u ON u.id = s.userId WHERE u.email = ? ORDER BY s.createdAt`).all(userEmail);
@@ -93,7 +95,7 @@ test('first-login enrollment: password, QR code + key, first code, backup codes,
   assert.equal(v.mfa.verified, true, 'the new session carries mfaVerifiedAt');
   assert.ok(v.mfa.verifiedAt instanceof Date);
   assert.equal(assertMfaVerified(v), v);
-  assert.equal(landingPath(v), '/dashboard');
+  assert.equal(landingPath(v), '/wallet', 'an MFA-verified customer lands on the wallet');
   // Better Auth replaced the password-only session: exactly one session, and it is marked.
   const rows = sessions(db, alice.email);
   assert.equal(rows.length, 1);
@@ -101,47 +103,47 @@ test('first-login enrollment: password, QR code + key, first code, backup codes,
 });
 
 test('wrong password during enrollment: no secret, nothing enrolled', async (t) => {
-  const { auth, db, login, viewerOf, mfaLimiter } = await setup(t);
+  const { auth, db, login, viewerOf, mfaLimiter, replayGuard } = await setup(t);
   const { browser } = await login(bob);
   const viewer = await viewerOf(browser);
   for (const password of ['wrong-password', '', 'x'.repeat(129), undefined]) {
-    assert.deepEqual(await startEnrollment({ auth, viewer, headers: browser.headers(), password, limiter: mfaLimiter }), { ok: false, error: INCORRECT_PASSWORD });
+    assert.deepEqual(await startEnrollment({ auth, viewer, headers: browser.headers(), password, limiter: mfaLimiter, replayGuard }), { ok: false, error: INCORRECT_PASSWORD });
   }
   assert.equal(db.prepare('SELECT count(*) AS n FROM twoFactor').get().n, 0);
   assert.equal((await viewerOf(browser)).mfa.enrolled, false);
 });
 
 test('enrollment only completes with a correct first code', async (t) => {
-  const { auth, login, viewerOf, mfaLimiter } = await setup(t);
+  const { auth, login, viewerOf, mfaLimiter, replayGuard } = await setup(t);
   const { browser } = await login(bob);
   const viewer = await viewerOf(browser);
-  const started = await startEnrollment({ auth, viewer, headers: browser.headers(), password: bob.password, limiter: mfaLimiter });
+  const started = await startEnrollment({ auth, viewer, headers: browser.headers(), password: bob.password, limiter: mfaLimiter, replayGuard });
   const secret = started.manualKey.replaceAll(' ', '');
   const right = totp(secret);
   const wrongCode = String((Number(right) + 1) % 1_000_000).padStart(6, '0');
   for (const code of [wrongCode, '12345', 'abcdef', '']) {
-    assert.deepEqual(await confirmEnrollment({ auth, viewer, headers: browser.headers(), code, limiter: mfaLimiter }), { ok: false, error: INVALID_CODE });
+    assert.deepEqual(await confirmEnrollment({ auth, viewer, headers: browser.headers(), code, limiter: mfaLimiter, replayGuard }), { ok: false, error: INVALID_CODE });
   }
   const after = await viewerOf(browser);
   assert.equal(after.mfa.enrolled, false, 'still not enrolled');
   assert.equal(after.mfa.verified, false);
-  const done = await confirmEnrollment({ auth, viewer, headers: browser.headers(), code: right, limiter: mfaLimiter });
+  const done = await confirmEnrollment({ auth, viewer, headers: browser.headers(), code: right, limiter: mfaLimiter, replayGuard });
   assert.equal(done.ok, true);
 });
 
 test('an account with TOTP can never be re-enrolled from a password-only session', async (t) => {
-  const { auth, db, login, viewerOf, mfaLimiter } = await setup(t);
+  const { auth, db, login, viewerOf, mfaLimiter, replayGuard } = await setup(t);
   const old = await login(alice); // password-only session from before enrollment
   const viewerBefore = await viewerOf(old.browser);
-  const started = await startEnrollment({ auth, viewer: viewerBefore, headers: old.browser.headers(), password: alice.password, limiter: mfaLimiter });
+  const started = await startEnrollment({ auth, viewer: viewerBefore, headers: old.browser.headers(), password: alice.password, limiter: mfaLimiter, replayGuard });
   const fresh = (await login(alice)).browser;
-  await confirmEnrollment({ auth, viewer: await viewerOf(fresh), headers: fresh.headers(), code: totp(started.manualKey.replaceAll(' ', '')), limiter: mfaLimiter });
+  await confirmEnrollment({ auth, viewer: await viewerOf(fresh), headers: fresh.headers(), code: totp(started.manualKey.replaceAll(' ', '')), limiter: mfaLimiter, replayGuard });
 
   const stale = await viewerOf(old.browser);
   assert.equal(stale.mfa.enrolled, true);
   assert.equal(stale.mfa.verified, false, 'the older password-only session never became verified');
   const secretBefore = db.prepare('SELECT secret FROM twoFactor').get().secret;
-  assert.deepEqual(await startEnrollment({ auth, viewer: stale, headers: old.browser.headers(), password: alice.password, limiter: mfaLimiter }), { ok: false, error: ALREADY_ENROLLED });
+  assert.deepEqual(await startEnrollment({ auth, viewer: stale, headers: old.browser.headers(), password: alice.password, limiter: mfaLimiter, replayGuard }), { ok: false, error: ALREADY_ENROLLED });
   assert.equal(db.prepare('SELECT secret FROM twoFactor').get().secret, secretBefore, 'secret unchanged');
 });
 
@@ -235,26 +237,26 @@ test('MFA attempts are rate limited per user, across new challenges', async (t) 
 });
 
 test('Better Auth also invalidates a single challenge after 5 wrong codes', async (t) => {
-  const { enroll, login, auth, ro } = await setup(t);
+  const { enroll, login, auth, ro, replayGuard } = await setup(t);
   const { secret } = await enroll(alice);
   const { browser } = await login(alice);
   const generous = createMfaRateLimiter(); // isolate Better Auth's own per-challenge limit
   generous.check = () => ({ allowed: true, retryAfterSeconds: 0 });
   let last;
   for (let i = 0; i < 6; i++) {
-    last = await verifyChallenge({ auth, identityDb: ro, headers: browser.headers(), method: 'totp', code: '000000', limiter: generous });
+    last = await verifyChallenge({ auth, identityDb: ro, headers: browser.headers(), method: 'totp', code: '000000', limiter: generous, replayGuard });
   }
   assert.equal(last.restart, true);
   assert.ok([CHALLENGE_EXHAUSTED, CHALLENGE_EXPIRED].includes(last.error), last.error);
-  const late = await verifyChallenge({ auth, identityDb: ro, headers: browser.headers(), method: 'totp', code: totp(secret, Date.now() + 30_000), limiter: generous });
+  const late = await verifyChallenge({ auth, identityDb: ro, headers: browser.headers(), method: 'totp', code: totp(secret, Date.now() + 30_000), limiter: generous, replayGuard });
   assert.equal(late.ok, false, 'even the right code cannot use an exhausted challenge');
 });
 
 test('a missing or forged challenge cookie is refused', async (t) => {
-  const { auth, ro, mfaLimiter } = await setup(t);
-  const none = await verifyChallenge({ auth, identityDb: ro, headers: new Headers(LOCAL), method: 'totp', code: '123456', limiter: mfaLimiter });
+  const { auth, ro, mfaLimiter, replayGuard } = await setup(t);
+  const none = await verifyChallenge({ auth, identityDb: ro, headers: new Headers(LOCAL), method: 'totp', code: '123456', limiter: mfaLimiter, replayGuard });
   assert.deepEqual([none.ok, none.error, none.restart], [false, CHALLENGE_EXPIRED, true]);
-  const forged = await verifyChallenge({ auth, identityDb: ro, headers: new Headers({ ...LOCAL, cookie: 'better-auth.two_factor=2fa-forged.c2ln' }), method: 'totp', code: '123456', limiter: mfaLimiter });
+  const forged = await verifyChallenge({ auth, identityDb: ro, headers: new Headers({ ...LOCAL, cookie: 'better-auth.two_factor=2fa-forged.c2ln' }), method: 'totp', code: '123456', limiter: mfaLimiter, replayGuard });
   assert.deepEqual([forged.ok, forged.restart], [false, true]);
   assert.equal(challengeIdFrom(new Headers({ cookie: 'better-auth.two_factor=2fa-abc.sig%3D' })), '2fa-abc');
   assert.equal(challengeIdFrom(new Headers({ cookie: 'other=1' })), null);

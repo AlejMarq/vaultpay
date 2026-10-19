@@ -17,8 +17,13 @@ npm.cmd ci
 npm.cmd run setup          # creates data/: databases, dev CA + certificates, per-process secrets, demo data
 npm.cmd run setup:check    # read-only verification of the installation
 npm.cmd test               # automated tests
-npm.cmd run dev            # http://localhost:3000
+npm.cmd run build
+npm.cmd run test:http      # the built app over real HTTP (temporary install)
+npm.cmd run dev            # http://localhost:3000 – listens on 127.0.0.1 only
 ```
+
+After pulling new code, run `npm.cmd run setup` again: it backs up and migrates any
+database whose schema is older than the code (identity v3, transaction v2).
 
 `npm run setup` is safe to repeat: it creates only what is missing and never overwrites
 existing databases, secrets or certificates without an explicit option and a typed
@@ -36,7 +41,13 @@ Demo logins (password in [docs/SETUP.md](docs/SETUP.md#4-demo-accounts-localhost
 
 Merchant: **Demo Coffee** (QR `vaultpay:merchant:demo-coffee`, $0.00).
 
-Full details – what setup creates, reset options, `setup:check`, troubleshooting:
+Every account enrols an authenticator app (TOTP) on its first sign-in and needs a code on
+every sign-in after that. Customers then reach `/wallet` and `/send` (Carol is told why
+sending is unavailable while her KYC is pending); the support account reaches the
+read-only, audited `/support` lookup.
+
+Full details – sign-in and MFA, pages and roles, KYC rules, security protections, what
+setup creates, migrations, reset options, `setup:check`, troubleshooting:
 **[docs/SETUP.md](docs/SETUP.md)**. Design decisions and test results:
 [docs/PAIR_PROGRAMMING_LOG.md](docs/PAIR_PROGRAMMING_LOG.md).
 
