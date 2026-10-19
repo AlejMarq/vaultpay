@@ -135,8 +135,8 @@ test('mock bank refuses negative balances and keeps postings append-only', async
   assert.throws(() => bank.prepare("UPDATE account SET balance_cents = -1 WHERE account_ref = 'MCB-1001'").run(), /CHECK/);
   assert.throws(() => bank.prepare("UPDATE account SET opening_balance_cents = 1 WHERE account_ref = 'MCB-1001'").run(), /cannot change/);
   assert.throws(() => bank.prepare('DELETE FROM account').run(), /not deleted/);
-  bank.prepare("INSERT INTO posting VALUES ('p1', 'idem-0001', 'MCB-1001', 'MCB-1002', 100, 1)").run();
-  assert.throws(() => bank.prepare("INSERT INTO posting VALUES ('p2', 'idem-0001', 'MCB-1001', 'MCB-1002', 100, 1)").run(), /UNIQUE/);
+  bank.prepare("INSERT INTO posting (posting_ref, idempotency_key, debit_account, credit_account, amount_cents, created_at) VALUES ('p1', 'idem-0001', 'MCB-1001', 'MCB-1002', 100, 1)").run();
+  assert.throws(() => bank.prepare("INSERT INTO posting (posting_ref, idempotency_key, debit_account, credit_account, amount_cents, created_at) VALUES ('p2', 'idem-0001', 'MCB-1001', 'MCB-1002', 100, 1)").run(), /UNIQUE/);
   assert.throws(() => bank.prepare('UPDATE posting SET amount_cents = 1').run(), /append-only/);
 });
 
@@ -162,7 +162,7 @@ test('setup never resets balances or KYC decisions made after seeding', async (t
     const { identity, bank } = open(t, dataDir);
     // Simulate activity: a settled $12.50 payment from Alice to Demo Coffee, and Carol approved.
     bank.transaction(() => {
-      bank.prepare("INSERT INTO posting VALUES ('p1', 'idem-demo-1', 'MCB-1001', 'MCB-2001', 1250, 2)").run();
+      bank.prepare("INSERT INTO posting (posting_ref, idempotency_key, debit_account, credit_account, amount_cents, created_at) VALUES ('p1', 'idem-demo-1', 'MCB-1001', 'MCB-2001', 1250, 2)").run();
       bank.prepare("UPDATE account SET balance_cents = balance_cents - 1250, updated_at = updated_at + 1 WHERE account_ref = 'MCB-1001'").run();
       bank.prepare("UPDATE account SET balance_cents = balance_cents + 1250, updated_at = updated_at + 1 WHERE account_ref = 'MCB-2001'").run();
     })();

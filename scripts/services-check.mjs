@@ -107,7 +107,7 @@ try {
   failures += 1;
   console.log(`  FAIL  ${e.stack ?? e.message}`);
 } finally {
-  if (running) await Promise.all([running.cbi.stop(), running.identity.stop(), running.bank.stop()]);
+  if (running) await Promise.all([running.settlement.stop(), running.fraud.stop(), running.cbi.stop(), running.identity.stop(), running.bank.stop()]);
   fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 console.log(failures === 0 ? '\nALL SERVICE CHECKS PASSED' : `\n${failures} SERVICE CHECK(S) FAILED`);

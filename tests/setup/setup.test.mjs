@@ -38,10 +38,10 @@ test('fresh setup creates every database, secret and certificate, and passes all
   const files = Object.keys(snapshot(dataDir)).map((f) => f.replaceAll('\\', '/')).sort();
   assert.deepEqual(files, [
     'db/identity.db', 'db/mock-core-banking.db', 'db/transaction.db',
-    'pki/ca.crt', 'pki/ca.key', 'pki/cbi.crt', 'pki/cbi.key', 'pki/identity.crt', 'pki/identity.key', 'pki/mock-core-banking.crt', 'pki/mock-core-banking.key',
-    'pki/recon.crt', 'pki/recon.key', 'pki/settlement.crt', 'pki/settlement.key', 'pki/web.crt', 'pki/web.key',
+    'pki/ca.crt', 'pki/ca.key', 'pki/cbi.crt', 'pki/cbi.key', 'pki/fraud.crt', 'pki/fraud.key', 'pki/identity.crt', 'pki/identity.key', 'pki/mock-core-banking.crt', 'pki/mock-core-banking.key',
+    'pki/orchestrator.crt', 'pki/orchestrator.key', 'pki/recon.crt', 'pki/recon.key', 'pki/settlement-server.crt', 'pki/settlement-server.key', 'pki/settlement.crt', 'pki/settlement.key', 'pki/web.crt', 'pki/web.key',
     'secrets/cbi.env', 'secrets/fraud.env', 'secrets/identity.env', 'secrets/mock-core-banking.env', 'secrets/mock-fraud-scoring.env',
-    'secrets/settlement.env', 'secrets/web.env',
+    'secrets/orchestrator.env', 'secrets/recon.env', 'secrets/settlement.env', 'secrets/web.env',
     'setup-manifest.json',
   ]);
 });
@@ -81,7 +81,7 @@ test('two installations generate independent keys, certificates and databases', 
 test('the manifest contains no secret or key material', async (t) => {
   const { dataDir } = await freshInstall(t);
   const manifest = fs.readFileSync(path.join(dataDir, 'setup-manifest.json'), 'utf8');
-  for (const proc of ['web', 'fraud', 'settlement', 'cbi', 'mock-core-banking', 'mock-fraud-scoring']) {
+  for (const proc of ['web', 'identity', 'fraud', 'orchestrator', 'settlement', 'cbi', 'mock-core-banking', 'mock-fraud-scoring']) {
     for (const [k, v] of Object.entries(util.parseEnv(readEnv(dataDir, proc)))) {
       if (/SECRET|KEY$|SIGNING|PUBLIC/.test(k) && !k.endsWith('KEY_ID')) assert.ok(!manifest.includes(v), `${proc} ${k} leaked into manifest`);
     }
@@ -147,7 +147,7 @@ test('an older database schema is backed up before being migrated', async (t) =>
 
   const report = await runSetup({ dataDir });
   const line = report.created.find((c) => c.startsWith('transaction database migrated'));
-  assert.match(line, /v0 → v2 \(backup: backups[\\/].+[\\/]transaction\.db\)/);
+  assert.match(line, /v0 → v6 \(backup: backups[\\/].+[\\/]transaction\.db\)/);
   const backup = path.join(dataDir, line.match(/backup: (.+)\)$/)[1]);
   const copy = new Database(backup, { readonly: true });
   assert.equal(copy.prepare('SELECT schema_version FROM db_meta').get().schema_version, 0);

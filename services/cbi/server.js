@@ -39,7 +39,7 @@ const server = createCbiServer({
 
 server.listen(servicePort('cbi'), SERVICE_HOST, () => {
   const { address, port } = server.address();
-  console.log(`[cbi] listening on https://${address}:${port} (mTLS, clients: vaultpay-web)`);
+  console.log(`[cbi] listening on https://${address}:${port} (mTLS, clients: vaultpay-web → balance, vaultpay-settlement → postings, vaultpay-recon → posting lookup)`);
 });
 
 const shutdown = () => server.close(() => process.exit(0));

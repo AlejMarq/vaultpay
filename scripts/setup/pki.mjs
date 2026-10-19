@@ -32,6 +32,11 @@ export const CERTIFICATES = Object.freeze([
   // Step 4B
   { name: 'identity', cn: 'vaultpay-identity', serverAuth: true, clientAuth: false },  // Identity service (issues service tokens)
   { name: 'web', cn: 'vaultpay-web', serverAuth: false, clientAuth: true },           // Next.js as a client of Identity and CBI
+  // Step 6
+  { name: 'fraud', cn: 'vaultpay-fraud', serverAuth: true, clientAuth: false },        // Fraud & Risk Check service
+  { name: 'orchestrator', cn: 'vaultpay-orchestrator', serverAuth: false, clientAuth: true }, // outbox workers as clients of Fraud & Risk and Settlement
+  // Step 7: Settlement's server identity (its existing `settlement` certificate stays client-only)
+  { name: 'settlement-server', cn: 'vaultpay-settlement', serverAuth: true, clientAuth: false },
 ]);
 
 export const PKI_FILES = Object.freeze(

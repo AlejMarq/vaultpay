@@ -18,7 +18,7 @@ import { hasFailures, runChecks } from './check.mjs';
 import { DATABASE_NAMES, ensureDatabases } from './databases.mjs';
 import { buildDirectoryAtomically, directoryState, ensurePlainDirectory, layout, lstatOrUndefined, SetupError } from './paths.mjs';
 import { addMissingCertificates, generatePki, verifyPki } from './pki.mjs';
-import { generateSecrets, readSecret, upgradeSecretsLayout, verifySecrets } from './secrets.mjs';
+import { generateSecrets, readSecret, upgradeSecretsForFraud, upgradeSecretsForRecon, upgradeSecretsForSettlement, upgradeSecretsLayout, verifySecrets } from './secrets.mjs';
 import { assertNotProduction, ensureDemoData } from './seed.mjs';
 
 export const RESETS = Object.freeze({
@@ -142,8 +142,15 @@ export async function runSetup({ dataDir, now = Date.now(), reset = {}, confirm 
       dir: paths.secrets,
       generate: (dir) => generateSecrets(dir, { now }),
       verify: verifySecrets,
-      upgrade: (dir) => (upgradeSecretsLayout(dir, { backupDir: path.join(paths.backups, stamp, 'secrets'), now })
-        ? 'service-token signing key moved from web.env to identity.env; old web.env backed up' : null),
+      upgrade: (dir) => {
+        const backupDir = path.join(paths.backups, stamp, 'secrets');
+        const done = [];
+        if (upgradeSecretsLayout(dir, { backupDir, now })) done.push('service-token signing key moved from web.env to identity.env; old web.env backed up');
+        if (upgradeSecretsForFraud(dir, { backupDir, now })) done.push('fraud.env given its certificate, orchestrator.env added; old fraud.env backed up');
+        if (upgradeSecretsForSettlement(dir, { backupDir, now })) done.push('settlement.env given its server certificate, identity.env the risk-decision public key; old files backed up');
+        if (upgradeSecretsForRecon(dir, { backupDir, now })) done.push('Reconciliation certificate moved from web.env to recon.env; old web.env backed up');
+        return done.length ? done.join('; ') : null;
+      },
       renewHint: RESETS.secrets.flag,
       report,
     });

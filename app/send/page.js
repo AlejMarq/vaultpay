@@ -4,11 +4,13 @@ import { INELIGIBLE, readEligibility } from '@/lib/server/eligibility';
 import { readOnlyIdentityDb, requireCustomer } from '@/lib/server/session';
 
 import { SessionKeepAlive, SignOutButton } from '../session-controls';
+import { TransferForm } from './transfer-form';
 
-// Send money (placeholder until Step 5). requireCustomer(): MFA completed in this session
-// and an active customer (support users and suspended customers never get here). The
-// eligibility rules are then read from the database on this request.
-// There is deliberately no form and no Server Action on this page yet.
+// Send money (Step 5). requireCustomer(): MFA completed in this session and an active
+// customer (support users and suspended customers never get here). The eligibility rules
+// are then read from the database on this request; only an eligible customer gets the
+// form. The Server Action (./actions.js) checks everything again – showing the form
+// grants nothing.
 export const instant = false;
 
 export const metadata = { title: 'Send money – VaultPay' };
@@ -34,9 +36,8 @@ export default async function SendPage() {
         <SignOutButton />
       </header>
       {eligibility.eligible ? (
-        <section className="card stack" data-eligibility="eligible">
-          <p>You are eligible to send money from wallet <code>{eligibility.walletId}</code>.</p>
-          <p className="notice">Transfers will be enabled in Step 5.</p>
+        <section className="stack" data-eligibility="eligible">
+          <TransferForm walletId={eligibility.walletId} />
         </section>
       ) : (
         <section className="card stack" data-eligibility="ineligible">

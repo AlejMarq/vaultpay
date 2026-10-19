@@ -545,13 +545,13 @@ try {
   });
 
   // Content only the /send page body renders (its static <title> is not data).
-  const SEND_CONTENT = ['data-eligibility', 'Transfers will be enabled', 'Sending money is unavailable'];
+  const SEND_CONTENT = ['data-eligibility', 'data-transfer-step', 'Sending money is unavailable'];
 
   console.log('\nSend money: eligibility (3E)');
   check('/wallet links to /send', (await (await get('/wallet', aw.header())).text()).includes('href="/send"'));
   const aliceSend = await sendState(aw);
-  check('Alice is eligible: placeholder for Step 5', aliceSend.eligibility === 'eligible' && aliceSend.html.includes('Transfers will be enabled in Step 5'), JSON.stringify({ ...aliceSend, html: undefined }));
-  check('no transfer submission is exposed (only the sign-out form)', aliceSend.forms === 1 && !/name="(amount|payee|recipient)/.test(aliceSend.html), String(aliceSend.forms));
+  check('Alice is eligible: the transfer form is shown', aliceSend.eligibility === 'eligible' && aliceSend.html.includes('data-transfer-step="edit"')
+    && /name="recipient"/.test(aliceSend.html) && /name="amount"/.test(aliceSend.html), JSON.stringify({ ...aliceSend, html: undefined }));
 
   const cw = await enrollViaHttp(carol);
   const carolWallet = (await (await get('/wallet', cw.header())).text()).replaceAll('<!-- -->', '');
@@ -565,6 +565,7 @@ try {
   addKyc('rejected');
   const carolRejected = await sendState(cw);
   check('a later rejected KYC record blocks her again', carolRejected.eligibility === 'ineligible' && JSON.stringify(carolRejected.reasons) === '["kyc_rejected"]', JSON.stringify(carolRejected.reasons));
+  check('an ineligible customer gets no transfer form', !carolRejected.html.includes('data-transfer-step') && !/name="amount"/.test(carolRejected.html));
 
   writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'frozen' WHERE wallet_id = 'wal_demo_alice'").run());
   const frozen = await sendState(aw);
@@ -607,6 +608,203 @@ try {
     send().catch(reject);
   });
 
+  // -------------------------------------------------------------------------
+  // Step 5: transfers through the real Server Action (review → confirm), the real balance
+  // flow (Identity → CBI → mock Core Banking) and the real transaction database.
+  console.log('\nSend money: transfers (Step 5)');
+  const sendHtml = await (await get('/send', aw.header())).text();
+  const TRANSFER_FORM = 'name="recipient"';
+  const sendAction = async (browser, fields, opts = {}) => {
+    const res = await post('/send', formFrom(sendHtml, fields, TRANSFER_FORM), { cookie: browser.header(), ...opts });
+    // A redirect() in the action is a real 303 for a no-JavaScript form POST.
+    const { to, html } = await redirectOf(res);
+    return { status: res.status, state: actionState(html), html, redirect: to };
+  };
+  const review = async (browser, recipient, amount) => (await sendAction(browser, { intent: 'review', recipient, amount })).state;
+  const confirmFields = (r, change = {}) => ({ intent: 'confirm', recipient: r.recipient, amount: r.amount, sourceWalletId: r.sourceWalletId, idempotencyKey: r.idempotencyKey, ...change });
+  const SEEDED = ['trf_a_to_b', 'trf_b_to_a', 'trf_c_to_b', 'trf_c_to_m'];
+  const transferRows = () => transactionRo.prepare('SELECT transfer_id, sender_wallet_id, payee_id, amount_cents, status, settlement_attempted_at FROM transfer ORDER BY created_at, rowid').all()
+    .filter((r) => !SEEDED.includes(r.transfer_id));
+  const transferAudit = (id) => transactionRo.prepare('SELECT actor_type, actor_id, event_type, subject_wallet_id FROM audit_event WHERE transfer_id = ?').all(id);
+  const transferOutbox = (id) => transactionRo.prepare('SELECT target, status, attempts FROM outbox_message WHERE transfer_id = ?').all(id);
+
+  const r1 = await review(aw, bob.email, '12.50');
+  check('review shows a confirmation (recipient, amount, source wallet) and writes nothing',
+    r1?.step === 'confirm' && r1.review.recipient === bob.email && r1.review.amountCents === 1250 && r1.review.sourceWalletId === 'wal_demo_alice'
+    && /^[A-Za-z0-9_-]{16,128}$/.test(r1.review.idempotencyKey) && transferRows().length === 0, JSON.stringify(r1));
+  const c1 = await sendAction(aw, confirmFields(r1.review));
+  const t1 = c1.state?.transfer;
+  check('Alice → Bob $12.50: accepted as pending (security check), not completed',
+    c1.state?.step === 'done' && t1?.status === 'pending_risk' && t1.amountCents === 1250 && c1.state.replayed === false, JSON.stringify(c1.state));
+  const [row1] = transferRows();
+  check('the transfer is recorded: sender, recipient wallet, amount, pending_risk, no settlement attempt',
+    transferRows().length === 1 && row1.transfer_id === t1?.transferId && row1.sender_wallet_id === 'wal_demo_alice' && row1.payee_id === 'wal_demo_bob'
+    && row1.amount_cents === 1250 && row1.status === 'pending_risk' && row1.settlement_attempted_at === null, JSON.stringify(transferRows()));
+  check('same database transaction: one transfer.requested audit event and one fraud_check outbox message',
+    JSON.stringify(transferAudit(row1?.transfer_id)) === JSON.stringify([{ actor_type: 'customer', actor_id: 'cus_demo_alice', event_type: 'transfer.requested', subject_wallet_id: 'wal_demo_alice' }])
+    && JSON.stringify(transferOutbox(row1?.transfer_id)) === JSON.stringify([{ target: 'fraud_check', status: 'pending', attempts: 0 }]),
+    JSON.stringify([transferAudit(row1?.transfer_id), transferOutbox(row1?.transfer_id)]));
+  const stateLeaks = ['MCB-', 'eyJ', 'balanceCents', 'cus_demo_bob', 'Bob Demo', 'SQLITE', 'vaultpay-cbi'].filter((x) => `${JSON.stringify(r1)}${c1.html}`.includes(x));
+  check('review and confirmation responses carry no account reference, token, balance or internal detail', stateLeaks.length === 0, stateLeaks.join(', '));
+
+  const c1again = await sendAction(aw, confirmFields(r1.review));
+  check('resubmitting the same confirmation returns the same transfer (no duplicate)',
+    c1again.state?.step === 'done' && c1again.state.transfer.transferId === t1?.transferId && c1again.state.replayed === true && transferRows().length === 1, JSON.stringify(c1again.state));
+  const conflict = await sendAction(aw, confirmFields(r1.review, { amount: '99.00' }));
+  check('the same idempotency key with a different amount is refused', conflict.state?.error === 'idempotency_conflict' && transferRows().length === 1, JSON.stringify(conflict.state));
+
+  const r2 = (await review(aw, bob.email, '3.00')).review;
+  const parallel = await Promise.all(Array.from({ length: 5 }, () => sendAction(aw, confirmFields(r2))));
+  const parallelIds = new Set(parallel.map((p) => p.state?.transfer?.transferId));
+  check('5 concurrent submissions of one confirmation create exactly one transfer',
+    parallel.every((p) => p.state?.step === 'done') && parallelIds.size === 1 && transferRows().length === 2, JSON.stringify(parallel.map((p) => p.state?.error ?? p.status)));
+
+  const r3 = (await review(aw, bob.email, '4.00')).review;
+  const foreignSend = await post('/send', formFrom(sendHtml, confirmFields(r3), TRANSFER_FORM), { origin: 'http://evil.example', cookie: aw.header() });
+  const noOriginSend = await post('/send', formFrom(sendHtml, confirmFields(r3), TRANSFER_FORM), { origin: null, cookie: aw.header() });
+  check('foreign-Origin and missing-Origin transfer POSTs are rejected; nothing is written',
+    foreignSend.status >= 400 && noOriginSend.status >= 400 && transferRows().length === 2, `${foreignSend.status} / ${noOriginSend.status}`);
+  const rebTransfer = await rawRequest('POST', '/send', { host: `evil.example:${PORT}`, headers: { origin: `http://evil.example:${PORT}`, cookie: aw.header() }, form: formFrom(sendHtml, confirmFields(r3), TRANSFER_FORM) });
+  check('a "same-origin" transfer POST under a foreign Host (DNS rebinding) is rejected', rebTransfer.status >= 400 && transferRows().length === 2, String(rebTransfer.status));
+
+  const tampered = await sendAction(aw, confirmFields(r3, { sourceWalletId: 'wal_demo_bob' }));
+  check('a confirmation naming another customer\'s wallet as the source is refused', tampered.state?.error === 'source_wallet_changed' && transferRows().length === 2, JSON.stringify(tampered.state));
+  const selfReview = await review(aw, 'ALICE@example.test', '1.00');
+  const selfConfirm = await sendAction(aw, confirmFields({ ...r3, recipient: alice.email }));
+  check('self-transfers are refused (review and a crafted confirm)', selfReview?.error === 'self_transfer' && selfConfirm.state?.error === 'self_transfer', JSON.stringify([selfReview, selfConfirm.state]));
+  const amountChecks = [];
+  for (const [amount, error] of [['abc', 'invalid_amount'], ['12.345', 'invalid_amount'], ['-5', 'invalid_amount'], ['0', 'amount_out_of_range'], ['1000.01', 'amount_out_of_range']]) {
+    amountChecks.push([(await sendAction(aw, confirmFields(r3, { amount, idempotencyKey: 'http-amount-key-0001' }))).state?.error, error]);
+  }
+  check('invalid amounts and amounts over the $1,000 limit are refused', amountChecks.every(([got, want]) => got === want) && transferRows().length === 2, JSON.stringify(amountChecks));
+  const unknownRecipient = await sendAction(aw, confirmFields(r3, { recipient: 'nobody@example.test' }));
+  const staffRecipient = await sendAction(aw, confirmFields(r3, { recipient: support.email }));
+  check('unknown and staff recipients get the same generic refusal', unknownRecipient.state?.error === 'invalid_recipient' && staffRecipient.state?.error === 'invalid_recipient'
+    && JSON.stringify(Object.keys(unknownRecipient.state)) === JSON.stringify(Object.keys(staffRecipient.state)), JSON.stringify([unknownRecipient.state, staffRecipient.state]));
+
+  const carolReplay = await sendAction(cw, confirmFields(r3, { sourceWalletId: 'wal_demo_carol' }));
+  check('Carol (KYC rejected) replaying the transfer action is refused → /send', carolReplay.redirect === '/send' && transferRows().length === 2, `${carolReplay.status} ${carolReplay.redirect} ${JSON.stringify(carolReplay.state)}`);
+  const supportReplay = await sendAction(sw, confirmFields(r3));
+  const pwOnlyReplay = await sendAction(bw, confirmFields(r3, { sourceWalletId: 'wal_demo_bob', recipient: alice.email }));
+  check('support (wrong role) and a password-only session cannot submit transfers', supportReplay.redirect === '/access-denied' && pwOnlyReplay.redirect === '/mfa' && transferRows().length === 2,
+    `${supportReplay.redirect} / ${pwOnlyReplay.redirect}`);
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'frozen' WHERE wallet_id = 'wal_demo_alice'").run());
+  const frozenSend = await sendAction(aw, confirmFields(r3));
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'active' WHERE wallet_id = 'wal_demo_alice'").run());
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'suspended' WHERE customer_id = 'cus_demo_alice'").run());
+  const suspendedSend = await sendAction(aw, confirmFields(r3));
+  writeDb('identity', (db) => db.prepare("UPDATE customer SET status = 'active' WHERE customer_id = 'cus_demo_alice'").run());
+  check('a frozen wallet (→ /send) and a suspended customer (→ /access-denied) cannot submit', frozenSend.redirect === '/send' && suspendedSend.redirect === '/access-denied' && transferRows().length === 2,
+    `${frozenSend.redirect} / ${suspendedSend.redirect}`);
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'frozen' WHERE wallet_id = 'wal_demo_bob'").run());
+  const frozenRecipient = await sendAction(aw, confirmFields(r3));
+  writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'active' WHERE wallet_id = 'wal_demo_bob'").run());
+  check('a frozen recipient wallet cannot receive', frozenRecipient.state?.error === 'invalid_recipient' && transferRows().length === 2, JSON.stringify(frozenRecipient.state));
+
+  addKyc('approved'); // Carol: $100.00 at the bank
+  const carolBig = await sendAction(cw, confirmFields((await review(cw, bob.email, '100.01')).review));
+  check('insufficient funds (Carol, $100.00 balance, sends $100.01) is refused', carolBig.state?.error === 'insufficient_funds' && transferRows().length === 2, JSON.stringify(carolBig.state));
+  addKyc('rejected');
+
+  const aliceWalletAfter = (await (await get('/wallet', aw.header())).text()).replaceAll('<!-- -->', '');
+  // Pending outgoing: the seeded trf_a_to_b ($12.50) plus the two new transfers ($12.50 + $3.00).
+  check('/wallet shows the new transfers as "Pending – security check", with the pending total',
+    aliceWalletAfter.includes(t1?.transferId) && /data-status="pending_risk">Pending – security check</.test(aliceWalletAfter)
+    && aliceWalletAfter.includes('data-pending-outgoing="2800"') && !/data-status="completed"/.test(aliceWalletAfter), aliceWalletAfter.match(/data-pending-outgoing="\d+"/)?.[0]);
+  const carolAfter = await (await get('/wallet', cw.header())).text();
+  check('other customers do not see the transfer', !carolAfter.includes(t1?.transferId) && !carolAfter.includes('wal_demo_alice'));
+  check('no transfer was reported or stored as completed', transferRows().every((r) => r.status === 'pending_risk')
+    && transactionRo.prepare('SELECT count(*) AS n FROM ledger_entry').get().n === 0);
+
+  // -------------------------------------------------------------------------
+  // Step 6: the fraud outbox worker command against the real Fraud & Risk process.
+  console.log('\nFraud screening (Step 6)');
+  const rRisky = (await review(aw, bob.email, '300.00')).review;
+  const risky = (await sendAction(aw, confirmFields(rRisky))).state?.transfer;
+  check('a high-risk $300.00 transfer is accepted as pending first', risky?.status === 'pending_risk', JSON.stringify(risky));
+  const workerRun = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(root, 'services', 'orchestrator', 'fraud-worker.js'), '--once'], {
+      cwd: root, env: { ...process.env, VAULTPAY_DATA_DIR: dataDir, VAULTPAY_FRAUD_PORT: String(services.ports.fraud) }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    let text = '';
+    child.stdout.on('data', (d) => { text += d; });
+    child.stderr.on('data', (d) => { text += d; });
+    child.on('exit', (code) => resolve({ code, text }));
+  });
+  check('npm run fraud-worker -- --once: 2 approved, 1 declined', workerRun.code === 0 && /pending_settlement=2/.test(workerRun.text) && /declined=1/.test(workerRun.text), workerRun.text.trim().split('\n').at(-1));
+  const statusOf = (id) => transactionRo.prepare('SELECT status FROM transfer WHERE transfer_id = ?').get(id)?.status;
+  check('Alice → Bob $12.50 approved → pending_settlement; $300.00 declined', statusOf(t1?.transferId) === 'pending_settlement' && statusOf(risky?.transferId) === 'declined',
+    `${statusOf(t1?.transferId)} / ${statusOf(risky?.transferId)}`);
+  const aliceScreened = (await (await get('/wallet', aw.header())).text()).replaceAll('<!-- -->', '');
+  // [data-status, label] of the table row that holds transfer `id`.
+  const rowStatus = (id) => {
+    const row = aliceScreened.split('<tr>').find((r) => r.includes(id)) ?? '';
+    return row.match(/data-status="([a-z_]+)">([^<]*)</)?.slice(1, 3);
+  };
+  check('/wallet shows "Pending – awaiting settlement" and "Declined"',
+    JSON.stringify(rowStatus(t1?.transferId)) === JSON.stringify(['pending_settlement', 'Pending – awaiting settlement'])
+    && JSON.stringify(rowStatus(risky?.transferId)) === JSON.stringify(['declined', 'Declined']), JSON.stringify([rowStatus(t1?.transferId), rowStatus(risky?.transferId)]));
+  check('a declined transfer no longer counts as pending outgoing', aliceScreened.includes('data-pending-outgoing="2800"'), aliceScreened.match(/data-pending-outgoing="[0-9]+"/)?.[0]);
+  const screenLeaks = ['eyJ', 'rsk_', 'risk_score', 'amount_over_limit', 'vaultpay-fraud'].filter((s) => aliceScreened.includes(s));
+  check('the page shows no decision token, decision id, score or rule', screenLeaks.length === 0, screenLeaks.join(', '));
+  check('the worker output carries no decision token or key', !/eyJ|PRIVATE KEY/.test(workerRun.text));
+  check('nothing completed or posted before settlement', transactionRo.prepare("SELECT count(*) AS n FROM transfer WHERE status = 'completed'").get().n === 0
+    && transactionRo.prepare('SELECT count(*) AS n FROM ledger_entry').get().n === 0);
+
+  // -------------------------------------------------------------------------
+  // Step 7: the settlement worker command against the real Settlement, Identity, CBI and
+  // mock Core Banking processes; the wallet shows the confirmed result and the new balance.
+  console.log('\nSettlement (Step 7)');
+  const runWorker = (name) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(root, 'services', 'orchestrator', `${name}.js`), '--once'], {
+      cwd: root, env: { ...process.env, VAULTPAY_DATA_DIR: dataDir, VAULTPAY_SETTLEMENT_PORT: String(services.ports.settlement), VAULTPAY_FRAUD_PORT: String(services.ports.fraud) },
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    let text = '';
+    child.stdout.on('data', (d) => { text += d; });
+    child.stderr.on('data', (d) => { text += d; });
+    child.on('exit', (code) => resolve({ code, text }));
+  });
+  const settleRun = await runWorker('settlement-worker');
+  check('npm run settlement-worker -- --once: both approved transfers completed', settleRun.code === 0 && /completed=2/.test(settleRun.text), settleRun.text.trim().split('\n').at(-1));
+  check('Alice → Bob $12.50 is completed only now (bank posting confirmed)', statusOf(t1?.transferId) === 'completed'
+    && transactionRo.prepare("SELECT count(*) AS n FROM settlement_attempt WHERE transfer_id = ? AND outcome = 'settled' AND core_banking_ref IS NOT NULL").get(t1?.transferId).n === 1);
+  const ledgerTotals = transactionRo.prepare('SELECT debit_cents, credit_cents, entries FROM ledger_totals').get();
+  check('ledger: 2 transfers × (debit + credit), debits = credits = $15.50', JSON.stringify(ledgerTotals) === JSON.stringify({ debit_cents: 1550, credit_cents: 1550, entries: 4 }), JSON.stringify(ledgerTotals));
+  const aliceSettled = (await (await get('/wallet', aw.header())).text()).replaceAll('<!-- -->', '');
+  const settledRow = (id) => (aliceSettled.split('<tr>').find((r) => r.includes(id)) ?? '').match(/data-status="([a-z_]+)">([^<]*)</)?.slice(1, 3);
+  check('/wallet shows "Completed" and still "Declined"',
+    JSON.stringify(settledRow(t1?.transferId)) === JSON.stringify(['completed', 'Completed']) && JSON.stringify(settledRow(risky?.transferId)) === JSON.stringify(['declined', 'Declined']),
+    JSON.stringify([settledRow(t1?.transferId), settledRow(risky?.transferId)]));
+  check('/wallet shows Alice\'s new bank balance ($484.50) via Identity → CBI', aliceSettled.includes('data-balance="available"') && aliceSettled.includes('$484.50'), aliceSettled.match(/data-balance="\w+"/)?.[0]);
+  check('only the unsettled seeded test transfer is still pending outgoing', aliceSettled.includes('data-pending-outgoing="1250"'), aliceSettled.match(/data-pending-outgoing="[0-9]+"/)?.[0]);
+  const settleLeaks = ['MCB-', 'MCBP-', 'stlk_', 'rsk_', 'eyJ', 'corebanking', 'settlement_attempt'].filter((s) => aliceSettled.includes(s));
+  check('the page shows no bank account, posting reference, idempotency key or token', settleLeaks.length === 0, settleLeaks.join(', '));
+  check('the worker output carries no token or bank account', !/eyJ|MCB-1/.test(settleRun.text));
+
+  // -------------------------------------------------------------------------
+  // Step 8: the read-only operations overview.
+  console.log('\nOperations overview (Step 8)');
+  const opsViews = () => transactionRo.prepare("SELECT count(*) AS n FROM audit_event WHERE event_type = 'support.operations_view'").get().n;
+  const viewsBefore = opsViews();
+  const opsRes = await get('/operations', sw.header());
+  const opsHtml = (await opsRes.text()).replaceAll('<!-- -->', '');
+  check('support (MFA) sees the operations overview', opsRes.status === 200 && opsHtml.includes('Operations (read-only)') && opsHtml.includes('data-count="completed">2<'), opsHtml.match(/data-count="completed">\d+</)?.[0]);
+  check('it shows outbox, reconciliation and ledger integrity (balanced)', opsHtml.includes('data-table="outbox"') && opsHtml.includes('Reconciliation') && opsHtml.includes('data-ledger-balanced="true"'));
+  check('the view is recorded in the audit trail', opsViews() === viewsBefore + 1, `${viewsBefore} → ${opsViews()}`);
+  check('no form or action besides sign-out', (opsHtml.match(/<form/g) ?? []).length === 1 && !/name="(transfer|status|amount|kyc)/.test(opsHtml));
+  const opsLeaks = ['MCB-', 'MCBP-', 'stlk_', 'rsk_', 'eyJ', 'wal_demo', 'cus_demo', '@example.test', 'Alice Demo', 'Bob Demo', 'PRIVATE KEY'].filter((s) => opsHtml.includes(s));
+  check('no bank account, posting reference, key, token, wallet or customer detail on the page', opsLeaks.length === 0, opsLeaks.join(', '));
+  await expectRedirect('a customer cannot open /operations', await get('/operations', aw.header()), '/access-denied', ['Operations (read-only)', 'data-count']);
+  await expectRedirect('a password-only session cannot open /operations', await get('/operations', bw.header()), '/mfa', ['Operations (read-only)', 'data-count']);
+  await expectRedirect('signed out: /operations → /login', await get('/operations'), '/login');
+  check('refused views are not recorded as views', opsViews() === viewsBefore + 1);
+  await new Promise((r) => setTimeout(r, 2100));
+  await (await get('/operations', sw.header())).text();
+  check('a later reload is recorded as a new view', opsViews() === viewsBefore + 2, String(opsViews() - viewsBefore));
+  check('/support links to the overview', (await (await get('/support', sw.header())).text()).includes('href="/operations"'));
+
+  // -------------------------------------------------------------------------
   console.log('\nDNS rebinding (foreign Host header)');
   const evilHost = `evil.example:${PORT}`;
   const rebHealth = await rawRequest('GET', '/api/health', { host: evilHost });
@@ -633,7 +831,8 @@ try {
   const bobBrowser = await enrollViaHttp(bob);
   const bobWallet = (await (await get('/wallet', bobBrowser.header())).text()).replaceAll('<!-- -->', '');
   // (Bob's history legitimately names Alice's wallet as the sender of trf_a_to_b; her balance must not appear.)
-  check('Bob sees only his own balance ($250.00), never Alice\'s', bobWallet.includes('data-balance="available"') && bobWallet.includes('$250.00') && !bobWallet.includes('$500.00'),
+  // $250.00 + the two settled transfers from Alice ($12.50 + $3.00).
+  check('Bob sees only his own balance ($265.50), never Alice\'s', bobWallet.includes('data-balance="available"') && bobWallet.includes('$265.50') && !bobWallet.includes('$484.50'),
     `balance=${bobWallet.match(/data-balance="(\w+)"/)?.[1]} redirect=${bobWallet.match(/NEXT_REDIRECT;\w+;([^;]+);/)?.[1]} amounts=${(bobWallet.match(/\$\d+\.\d\d/g) ?? []).join(',')}`);
   await services.bank.stop();
   const bankDown = await balanceState();
@@ -643,6 +842,15 @@ try {
   check('CBI down → "temporarily unavailable"', cbiDown.state === 'unavailable' && cbiDown.html.includes('temporarily unavailable'));
   const downLeaks = ['ECONNREFUSED', 'cbi_503', 'unavailable:', 'upstream', 'MCB-', 'eyJ', '    at ', 'Error:'].filter((s) => `${bankDown.html}${cbiDown.html}`.includes(s));
   check('outage pages reveal nothing internal', downLeaks.length === 0, downLeaks.join(', '));
+  const rDown = (await review(aw, bob.email, '2.00')).review;
+  const downSend = await sendAction(aw, confirmFields(rDown));
+  check('a transfer while banking is down fails closed: not accepted, nothing written, same key kept for retry',
+    downSend.state?.step === 'confirm' && downSend.state.error === 'banking_unavailable' && downSend.state.review.idempotencyKey === rDown.idempotencyKey && transferRows().length === 3,
+    JSON.stringify(downSend.state));
+  const downReplay = await sendAction(aw, confirmFields(r1.review));
+  check('confirming an already recorded transfer again still answers from the database', downReplay.state?.replayed === true && downReplay.state.transfer.transferId === t1?.transferId);
+  const downLeaks2 = ['ECONNREFUSED', 'cbi_', 'MCB-', 'eyJ', 'SQLITE', '    at '].filter((x) => downSend.html.includes(x));
+  check('the outage refusal reveals nothing internal', downLeaks2.length === 0, downLeaks2.join(', '));
   check('the wallet page still works without a balance', cbiDown.html.includes('wal_demo_alice') && cbiDown.html.includes('Recent transfers'));
 
   // Last, because it locks Carol's sign-in for 15 minutes in this server process.
@@ -660,7 +868,7 @@ try {
   identity.close();
   server.kill();
   await exited;
-  await Promise.all([services.cbi.stop(), services.identity.stop(), services.bank.stop()]);
+  await Promise.all([services.settlement.stop(), services.fraud.stop(), services.cbi.stop(), services.identity.stop(), services.bank.stop()]);
   fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 

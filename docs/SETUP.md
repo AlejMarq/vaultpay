@@ -82,8 +82,8 @@ installation check → manifest.
 | Database | Version | Migrations |
 |----------|---------|------------|
 | identity | **v3** | `0001` customers, KYC, wallets, merchants, ops users · `0002` TOTP replay claims (`totp_code_use`) · `0003` claim owner token |
-| transaction | **v2** | `0001` transfers, ledger, risk, settlement, outbox, audit, reconciliation · `0002` registered audit event types |
-| mock-core-banking | v1 | `0001` accounts and postings |
+| transaction | **v6** | `0001` transfers, ledger, risk, settlement, outbox, audit, reconciliation · `0002` registered audit event types · `0003` transfer audit event type (`transfer.requested`) · `0004` fraud-screening audit event types · `0005` settlement: ledger ↔ bank posting link, double-entry and completion guards, `ledger_totals` view, settlement audit event types · `0006` reconciliation, recovery and operations audit event types |
+| mock-core-banking | **v2** | `0001` accounts and postings · `0002` posting reference and currency; postings need two active accounts |
 
 Better Auth's own tables (including the `session.mfaVerifiedAt` column) are created and
 upgraded by Better Auth's migrations, which setup runs after VaultPay's.
@@ -97,10 +97,12 @@ migrations. Migration files are checksummed – an edited migration stops setup.
 
 | File | Holds |
 |------|-------|
-| `web.env` | Better Auth secret, Next.js client certificate (`vaultpay-web`), Reconciliation client certificate – **no signing key** |
-| `identity.env` | Service-token **signing** key (only here), Identity server certificate |
-| `fraud.env` | Risk-decision **signing** key, service-token public key, mock fraud-scoring API key |
-| `settlement.env` | Risk-decision **public** key, service-token public key, Settlement client certificate |
+| `web.env` | Better Auth secret, Next.js client certificate (`vaultpay-web`) – **no signing key, no other service identity** |
+| `recon.env` | Reconciliation client certificate (`vaultpay-recon`) for `npm run reconcile` (moved out of `web.env` in Step 8) |
+| `identity.env` | Service-token **signing** key (only here), Identity server certificate, risk-decision **public** key (Step 7: settlement tokens only for approved transfers) |
+| `fraud.env` | Risk-decision **signing** key (only here), Fraud & Risk server certificate (`vaultpay-fraud`), service-token public key, mock fraud-scoring API key |
+| `orchestrator.env` | Risk-decision **public** key, fraud-worker client certificate (`vaultpay-orchestrator`) |
+| `settlement.env` | Risk-decision **public** key, service-token public key, Settlement client certificate (to Identity and CBI) and server certificate `settlement-server` (CN `vaultpay-settlement`, for the settlement worker) |
 | `cbi.env` | Service-token public key, mock Core Banking credential, CBI certificate |
 | `mock-core-banking.env` | Mock Core Banking credential and server certificate |
 | `mock-fraud-scoring.env` | Mock fraud-scoring API key |
@@ -170,8 +172,9 @@ not enough.
 | `/login` | anyone | Email + password |
 | `/mfa`, `/mfa/setup`, `/mfa/verify` | signed-in / signing-in users | Two-factor status, enrollment, sign-in challenge |
 | `/wallet` | active customers (MFA) | Name, email, KYC status, wallet ID and status, **balance** (via Identity and CBI, section 8), recent transfers (read-only) |
-| `/send` | active customers (MFA) | Whether you may send money right now, and why not. No transfer form yet (Step 5). |
+| `/send` | active customers (MFA) | Send money to another customer (review → confirm), or why sending is not available right now |
 | `/support` | active `support_readonly` users (MFA) | Look up a customer by email: masked email and phone, customer and KYC status, wallet, transfer history. Read-only; every search and view is audited. |
+| `/operations` | active `support_readonly` users (MFA) | Read-only operations overview: transfers by status, reserved funds, outbox and parked messages, settlements with an open outcome, reconciliation results and exceptions, ledger integrity, recent operational events. No actions; every view is audited. |
 | `/access-denied` | – | Shown for the wrong role, a suspended/closed customer, a disabled ops user, or an account with no VaultPay role |
 | `/dashboard` | – | Forwards to `/wallet`, `/support` or `/access-denied` |
 
@@ -197,6 +200,31 @@ explains why:
 KYC history is append-only: the newest record is the current status. There is no KYC
 approval screen yet.
 
+### Sending money (Step 5)
+
+1. On `/send`, enter the recipient's **email** and an amount in USD (`12.50`), then
+   **Review transfer**. Nothing is sent and the recipient is not looked up yet.
+2. The confirmation shows your wallet, the recipient email and the amount.
+   **Confirm and send** submits it; **Change details** goes back.
+3. The transfer is accepted as **"Pending – security check"** (`pending_risk`). It is
+   **not complete** and no money has moved yet. `/wallet` lists it, and shows the total of
+   your outgoing transfers that are not final yet. The fraud worker then screens it
+   (*"Pending – awaiting settlement"* or *"Declined"*), and the settlement worker moves the
+   money at the bank (*"Completed"* or *"Failed"*) – section 8.
+
+Rules (all checked on the server at confirmation, again just before saving):
+
+| Rule | Detail |
+|------|--------|
+| Sender | MFA in this session, active customer, approved latest KYC, the active wallet they own (the one their balance comes from) |
+| Recipient | Another active customer with an active wallet (KYC is not required to *receive*). Unknown emails, staff accounts, suspended customers and frozen wallets all get the same message: *"That recipient cannot receive transfers."* |
+| Amount | $0.01 – $1,000.00 per transfer, at most two decimals, parsed as integer cents |
+| Funds | Your bank balance (fetched through Identity and CBI) minus your transfers still pending must cover it. If the balance cannot be fetched, the transfer is **not** accepted ("We cannot check your balance right now"). This is a preliminary check: the bank enforces funds again at settlement. |
+| Duplicates | Each confirmation carries a one-time request key. Submitting it again (double click, retry after an error) returns the same transfer; it is never created twice. |
+
+Try it: Alice → `bob@example.test`, `12.50` → confirm → "Pending – security check".
+Carol (KYC pending) sees why she cannot send.
+
 ### Support lookups and the audit trail
 
 Support sees only what dispute resolution needs (`a***e@example.test`, `+•-•••-••01`).
@@ -217,6 +245,10 @@ record cannot be written, nothing is shown. Support's database connections are r
 | TOTP replay protection | Each TOTP code is claimed (hashed, per user) before Better Auth checks it, so one code completes at most one verification – also across concurrent attempts. Claims last 2 minutes. |
 | MFA marker | `session.mfaVerifiedAt` is set only by Better Auth when it creates a session by completing a second factor; it cannot be set by a client, copied to another session, or extended |
 | Headers | `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, restrictive `Permissions-Policy`, COOP/CORP `same-origin`; no `X-Powered-By` |
+| Reconciliation & recovery | Read-only bank lookup by the attempt's own key (single-use `records:read` token); completes only on a matching posting; never fails a transfer because a posting is missing (a late request could still post); never posts; expiry only for transfers that never sent a settlement request; integrity issues flagged, not corrected |
+| Settlement | Completed only after the bank confirms a posting; the bank enforces funds and active accounts itself and returns the original posting for a repeated idempotency key; settlement tokens name one posting, are certificate-bound, 30 s, single use; ledger double entry enforced by triggers |
+| Fraud decisions | Signed by Fraud & Risk only (Ed25519, 10-minute expiry), bound to the exact transfer, amount, parties and screening request; verified by the worker before anything changes; stored once (decision id is unique); worker claims are database leases, so concurrent or crashed workers never apply a decision twice |
+| Transfers | Server Action re-checks session, MFA, role, KYC and wallet at confirmation and just before saving; sender, source wallet and balance never come from the browser; integer cents; per-sender idempotency key in the database; transfer, audit event and outbox message saved in one database transaction; never marked completed on acceptance |
 | Service boundaries | Mock bank, Identity and CBI are separate processes on `127.0.0.1` with mutual TLS and exact caller allowlists; only Identity holds the token signing key, only CBI the bank credential; balance tokens are single-use, 30-second, certificate-bound (`docs/SERVICE_AUTH.md`) |
 | Build hygiene | `next build` never opens `data/`, and no database, key or secret is traced into build output (checked by `npm run test:http`) |
 
@@ -234,11 +266,13 @@ Customer balances come from three backend services, each its own Node.js process
 | mock Core Banking | `npm.cmd run mock-bank` | 4100 (`VAULTPAY_MOCK_BANK_PORT`) | Stands in for the bank; holds the balances; accepts only CBI |
 | Identity | `npm.cmd run identity` | 4200 (`VAULTPAY_IDENTITY_PORT`) | The **only** holder of the service-token signing key; issues a 30-second, single-use balance token for a signed-in, MFA-verified customer |
 | CBI | `npm.cmd run cbi` | 4300 (`VAULTPAY_CBI_PORT`) | The only component that talks to Core Banking; returns the balance for the account named in a valid token |
+| Fraud & Risk | `npm.cmd run fraud` | 4400 (`VAULTPAY_FRAUD_PORT`) | The **only** holder of the risk-decision signing key; screens a transfer and returns a signed approve/decline decision; accepts only the fraud worker |
+| Settlement | `npm.cmd run settlement` | 4500 (`VAULTPAY_SETTLEMENT_PORT`) | Moves money for one approved transfer: verifies the approval, gets a single-use settlement token from Identity, presents it to CBI; accepts only the settlement worker; holds no bank credential |
 
 **To see balances on `/wallet`:**
 
 ```powershell
-npm.cmd run services     # terminal 1: mock bank, Identity, CBI (Ctrl+C stops all three)
+npm.cmd run services     # terminal 1: mock bank, Identity, CBI, Fraud & Risk, Settlement (Ctrl+C stops all)
 npm.cmd run dev          # terminal 2: the app
 ```
 
@@ -252,7 +286,10 @@ browser or by Next.js.
 ```powershell
 npm.cmd run test:mock-bank   # the bank as a real process
 npm.cmd run test:services    # all three as real processes: binding, mTLS allowlists, no secrets
-npm.cmd run test:http        # the built app end to end, with all three services
+npm.cmd run test:http        # the built app end to end, with all services and the fraud worker
+npm.cmd run test:fraud       # Fraud & Risk and the fraud worker as real processes
+npm.cmd run test:settlement  # all five services and both workers as real processes
+npm.cmd run test:reconcile   # reconciliation and recovery against real processes
 ```
 
 All three refuse to start without `npm run setup` (`CONFIG_MISSING`) and on Node.js other
@@ -265,6 +302,144 @@ signing key. `npm.cmd run setup` now moves that key **unchanged** into the new
 certificates from the existing CA. Sessions, TOTP enrollments and all data are kept. Until
 then the app fails closed – no page is served and `/api/health` reports `unavailable`
 (server log: `web.env must not contain SERVICE_TOKEN_SIGNING_KEY`).
+### Fraud screening (Step 6)
+
+Submitted transfers wait as *"Pending – security check"* until the **fraud worker**
+screens them. The worker takes each transfer's `fraud_check` outbox message, sends the
+transfer as recorded in the database to Fraud & Risk, verifies the signed decision and
+applies it:
+
+| Decision | Transfer becomes | `/wallet` shows |
+|----------|------------------|-----------------|
+| approve | `pending_settlement` (queued for the settlement worker, below) | Pending – awaiting settlement |
+| decline | `declined` (final; no longer held against the balance) | Declined |
+
+```powershell
+npm.cmd run services                    # terminal 1 (includes Fraud & Risk)
+npm.cmd run dev                         # terminal 2
+npm.cmd run fraud-worker                # terminal 3: screens new transfers every 2 s (Ctrl+C stops)
+npm.cmd run fraud-worker -- --once      # or: screen everything due now, then exit
+```
+
+**Demo:** sign in as Alice, send **$12.50** to `bob@example.test` and **$300.00** to
+`bob@example.test`; run `npm.cmd run fraud-worker -- --once` → it prints
+`pending_settlement=1 declined=1`; `/wallet` shows *Pending – awaiting settlement* and
+*Declined*.
+
+Demo rules (deterministic, `lib/fraud/engine.js`): **decline** when the amount is
+**$250.00 or more**, the payee is the sender's own wallet, the payee is on the block list,
+or the transfer's time is implausible; otherwise **approve**. Change the threshold or block
+list when starting Fraud & Risk, e.g. in PowerShell
+`$env:VAULTPAY_FRAUD_DECLINE_AT_CENTS='1000'; npm.cmd run fraud` (declines from $10.00) or
+`$env:VAULTPAY_FRAUD_BLOCKED_PAYEES='wal_demo_bob'`.
+
+If Fraud & Risk is not running, nothing is approved: the transfer stays *Pending – security
+check* and the worker retries with a growing pause (1 s … 60 s; after 10 failed attempts the
+message is parked as `dead` and the transfer stays pending). Several workers can run at
+once; each transfer is screened and applied once.
+
+**Upgrading:** `npm.cmd run setup` gives `fraud.env` its certificate, creates
+`orchestrator.env` (the decision **public** key, derived from the existing signing key)
+and issues the `fraud` and `orchestrator` certificates from the existing CA; the
+transaction database is migrated to v4 (backup first).
+
+### Settlement (Step 7)
+
+The **settlement worker** takes each approved transfer's `settlement` outbox message and
+moves the money at the (mock) bank. Only a confirmed bank posting makes a transfer
+*Completed*:
+
+| Bank answer | Transfer becomes | `/wallet` shows |
+|-------------|------------------|-----------------|
+| posted (also when a retry finds the original posting) | `completed` – ledger debit + credit written | Completed, and the new balance |
+| refusal of the **first** send (insufficient funds, account frozen/closed at the bank, a VaultPay party no longer active) | `failed` – nothing moved | Failed |
+| refusal after an earlier unanswered send | stays `settlement_in_flight` (the earlier request could still post); retried with the same key | Processing |
+| no answer / timeout / outage | stays `settlement_in_flight`; retried with the **same** bank idempotency key | Processing |
+| approval expired before sending | back to `pending_risk` and screened again | Pending – security check |
+
+```powershell
+npm.cmd run services                          # terminal 1 (includes Settlement)
+npm.cmd run dev                               # terminal 2
+npm.cmd run fraud-worker -- --once            # screen submitted transfers
+npm.cmd run settlement-worker -- --once       # settle approved ones (or run both without --once)
+```
+
+**Demo (fresh install):** Alice sends **$12.50** to `bob@example.test` → `fraud-worker
+--once` (`pending_settlement=1`) → `settlement-worker --once` (`completed=1`) → Alice's
+`/wallet` shows *Completed* and **$487.50**; Bob's shows **$262.50**. A **$300.00**
+transfer is declined by fraud and never reaches the bank.
+
+To see a bank timeout: stop the services, start the bank alone with
+`$env:VAULTPAY_MOCK_BANK_POST_DELAY_MS='4500'; npm.cmd run mock-bank` (it answers after CBI
+gave up), start the others, settle – the transfer shows *Processing*; restart the bank
+normally and settle again – it completes with the original posting, money moved once.
+
+**Upgrading:** `npm.cmd run setup` adds the Settlement server certificate and paths to
+`settlement.env`, adds the risk-decision **public** key to `identity.env` (from
+`settlement.env`; nothing is regenerated, old files backed up), and migrates the
+transaction database to v5 and the mock bank database to v2 (backups first; balances and
+existing data are kept).
+
+### Operations: reconciliation and recovery (Step 8)
+
+**Monitoring.** Sign in as `support@example.test` → `/support` → *Operations overview*
+(`/operations`). It is read-only: no buttons, no actions. Watch:
+
+| Section | What needs attention |
+|---------|----------------------|
+| Settlements with an open outcome | `settlement_in_flight` with bank outcome `unknown`/`pending` – their funds stay reserved until resolved |
+| Parked messages | `dead` fraud/settlement messages (`last_error` says why, e.g. `fraud_unavailable`, `needs_reconciliation`) |
+| Exceptions | the bank holds a posting for the attempt's key whose details differ – investigate; never corrected automatically |
+| Ledger integrity | must say *balanced* with no issues |
+| Overdue pending | transfers past their 1-hour deadline, waiting for the next reconcile pass |
+
+**Recovery runs on the server** (an operator with access to this computer, not the web UI):
+
+```powershell
+npm.cmd run reconcile -- --once                  # one pass
+npm.cmd run reconcile                            # or keep it running (every 15 s)
+npm.cmd run reconcile -- --once --requeue-dead   # also retry parked messages (operator decision)
+```
+
+A pass:
+
+1. **Expires** `pending_risk`/`pending_settlement` transfers past their deadline that never
+   sent a settlement request (and no worker holds right now) → *Expired*; funds released.
+2. **Reconciles** each settlement with an open outcome older than 2 minutes and not being
+   worked on: asks the bank – read-only – whether it holds a posting for the attempt's own
+   idempotency key with the expected transfer, accounts, amount and currency:
+   - **posted** → *Completed*, one ledger debit + credit, result `matched`;
+   - **not posted (yet)** → left unresolved, funds stay reserved. A missing posting is not proof
+     that none will appear (a request may still be inside the bank), so it never fails the
+     transfer; if the posting appears later the next pass completes it;
+   - **different details** → exception, left in flight (funds reserved);
+   - **cannot tell** (bank/CBI/Identity down, invalid answer) → nothing changes; retried next pass.
+   It never sends a payment.
+3. **Requeues** (only with `--requeue-dead`) a parked fraud check of a transfer still awaiting
+   screening, or a parked settlement message of a transfer not yet sent – as a new message.
+   Settlements already in flight are never requeued; reconciliation resolves them.
+4. **Checks the ledger** (debits = credits; one debit + credit per completed transfer) and
+   records any issue as `ledger.integrity_mismatch` – never corrects it.
+
+Every outcome is recorded (`reconciliation_result`, audit events `transfer.reconciled`,
+`reconciliation.mismatch`, `reconciliation.unresolved`, `transfer.expired`, `outbox.requeued`,
+`ledger.integrity_mismatch`) and shown on `/operations`.
+
+**Manual resolution.** A transfer that stays *Processing* with "no posting found" (or a
+mismatch) needs a person: confirm with the bank that the key can no longer post, then resolve
+it outside the web UI. Until then its funds stay reserved – VaultPay never guesses.
+
+**Demo – a lost bank answer:** start the bank with `$env:VAULTPAY_MOCK_BANK_POST_DELAY_MS='4500'`,
+send $12.50 Alice → Bob, run `fraud-worker --once` and `settlement-worker --once` → the
+transfer shows *Processing* (the bank did post); restart the bank normally, wait two
+minutes (or set `$env:VAULTPAY_RECONCILE_MIN_AGE_MS='1000'`), run `npm.cmd run reconcile -- --once`
+→ `completed=1`; Alice's wallet shows *Completed* and $487.50; `/operations` lists the
+`matched` result.
+
+**Upgrading:** `npm.cmd run setup` moves the Reconciliation certificate paths from `web.env`
+to a new `recon.env` (same certificate; old `web.env` backed up) and migrates the transaction
+database to v6 (backup first).
+
 ## 9. Running setup again, and replacing items
 
 Re-running is safe and is the normal way to update an installation:

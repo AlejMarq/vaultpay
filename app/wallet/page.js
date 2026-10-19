@@ -41,6 +41,12 @@ export default async function WalletPage() {
             {balance.inactiveWallet ? 'Not available for a frozen or closed wallet.' : 'Your balance is temporarily unavailable. Please try again later.'}
           </dd>
         )}
+        {overview.pendingOutgoingCents > 0 ? (
+          <>
+            <dt>Pending outgoing</dt>
+            <dd data-pending-outgoing={overview.pendingOutgoingCents}>{formatUsd(overview.pendingOutgoingCents)} <span className="muted">not final yet; reserved until screened and settled</span></dd>
+          </>
+        ) : null}
       </dl>
       {overview.kycStatus !== 'approved' ? (
         <p className="notice">Your identity verification is not complete yet. Sending money will require approved KYC.</p>

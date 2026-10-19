@@ -68,9 +68,10 @@ function completedTransfer(db, overrides) {
   return id;
 }
 
-function post(db, transferId, { id = `led_${Math.random().toString(36).slice(2)}`, type = 'wallet', account, direction, amount = 1250, reverses = null }) {
-  db.prepare(`INSERT INTO ledger_entry (entry_id, transfer_id, account_type, account_id, direction, amount_cents, reverses_entry_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(id, transferId, type, account, direction, amount, reverses, T0 + 30);
+// Since v5 a posting carries its bank posting reference (completedTransfer settles as 'cb-1').
+function post(db, transferId, { id = `led_${Math.random().toString(36).slice(2)}`, type = 'wallet', account, direction, amount = 1250, reverses = null, ref = 'cb-1' }) {
+  db.prepare(`INSERT INTO ledger_entry (entry_id, transfer_id, account_type, account_id, direction, amount_cents, reverses_entry_id, core_banking_ref, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, transferId, type, account, direction, amount, reverses, ref, T0 + 30);
   return id;
 }
 
@@ -127,7 +128,7 @@ test('transfer: the full happy path is allowed', (t) => {
 test('transfer: invalid status transitions are blocked', (t) => {
   const { db } = freshDb(t, 'transaction');
   const id = insertTransfer(db);
-  assertRejected(() => setStatus(db, id, 'completed', `, settlement_attempted_at = ${T0}`), 'invalid transfer status transition');
+  assertRejected(() => setStatus(db, id, 'completed', `, settlement_attempted_at = ${T0}`)); // transition and v5 settlement triggers
   assertRejected(() => setStatus(db, id, 'settlement_in_flight', `, settlement_attempted_at = ${T0}`), 'invalid transfer status transition');
 
   const done = completedTransfer(db);
@@ -171,21 +172,53 @@ test('transfer (D5): never expires or re-screens once settlement was attempted',
 test('ledger: postings are only allowed for completed transfers and must match them', (t) => {
   const { db } = freshDb(t, 'transaction');
   const pending = insertTransfer(db);
-  assertRejected(() => post(db, pending, { account: 'wal_alice', direction: 'debit' }), 'does not match a completed transfer');
+  assertRejected(() => post(db, pending, { account: 'wal_alice', direction: 'debit' })); // not completed, no settled posting
 
   const id = completedTransfer(db);
   assertRejected(() => post(db, id, { account: 'wal_alice', direction: 'debit', amount: 9999 }), 'does not match');
   assertRejected(() => post(db, id, { account: 'wal_bob', direction: 'debit' }), 'does not match');
-  assertRejected(() => post(db, id, { account: 'wal_mallory', direction: 'credit' }), 'does not match');
   post(db, id, { account: 'wal_alice', direction: 'debit' });
+  assertRejected(() => post(db, id, { account: 'wal_mallory', direction: 'credit' }), 'does not match');
   post(db, id, { account: 'wal_bob', direction: 'credit' });
 });
 
 test('ledger: merchant payments credit the merchant account', (t) => {
   const { db } = freshDb(t, 'transaction');
   const id = completedTransfer(db, { payee_type: 'merchant', payee_id: 'mer_coffee' });
+  post(db, id, { account: 'wal_alice', direction: 'debit' });
   assertRejected(() => post(db, id, { type: 'wallet', account: 'wal_coffee', direction: 'credit' }));
   post(db, id, { type: 'merchant', account: 'mer_coffee', direction: 'credit' });
+});
+
+test('ledger (v5): double entry tied to the bank posting; completion and failure need settlement attempts', (t) => {
+  const { db } = freshDb(t, 'transaction');
+  const id = completedTransfer(db);
+  assertRejected(() => post(db, id, { account: 'wal_alice', direction: 'debit', ref: 'cb-other' }), 'settled bank posting');
+  assertRejected(() => post(db, id, { account: 'wal_alice', direction: 'debit', ref: null }), 'settled bank posting');
+  assertRejected(() => post(db, id, { account: 'wal_bob', direction: 'credit' }), 'matching debit first');
+  post(db, id, { account: 'wal_alice', direction: 'debit' });
+  post(db, id, { account: 'wal_bob', direction: 'credit' });
+  assert.deepEqual(db.prepare('SELECT debit_cents, credit_cents, entries FROM ledger_totals').get(), { debit_cents: 1250, credit_cents: 1250, entries: 2 });
+
+  // A completed transfer's settlement message cannot be finished without both entries.
+  const half = completedTransfer(db);
+  db.prepare(`INSERT INTO outbox_message (message_id, transfer_id, target, status, attempts, next_attempt_at, created_at, updated_at)
+    VALUES ('obx_half', ?, 'settlement', 'pending', 0, ${T0}, ${T0}, ${T0})`).run(half);
+  post(db, half, { account: 'wal_alice', direction: 'debit' });
+  assertRejected(() => db.prepare(`UPDATE outbox_message SET status = 'done', updated_at = ${T0 + 1} WHERE message_id = 'obx_half'`).run(), 'balanced debit and credit');
+  post(db, half, { account: 'wal_bob', direction: 'credit' });
+  db.prepare(`UPDATE outbox_message SET status = 'done', updated_at = ${T0 + 1} WHERE message_id = 'obx_half'`).run();
+
+  // In flight with only a pending attempt: neither completed nor failed.
+  const open = insertTransfer(db);
+  const decisionId = sendToSettlement(db, open);
+  const attempt = insertAttempt(db, open, decisionId);
+  assertRejected(() => setStatus(db, open, 'completed'), 'only after a settled bank posting');
+  assertRejected(() => setStatus(db, open, 'failed'), 'fails only after');
+  db.prepare("UPDATE settlement_attempt SET outcome = 'unknown' WHERE attempt_id = ?").run(attempt);
+  assertRejected(() => setStatus(db, open, 'failed'), 'fails only after');
+  db.prepare(`UPDATE settlement_attempt SET outcome = 'failed', completed_at = ${T0 + 20} WHERE attempt_id = ?`).run(attempt);
+  setStatus(db, open, 'failed');
 });
 
 test('ledger: a transfer cannot be posted twice', (t) => {
@@ -324,10 +357,13 @@ test('audit events: append-only with checked actor and event type', (t) => {
   assertRejected(() => db.prepare('DELETE FROM audit_event').run(), 'append-only');
 });
 
-test('audit events (v2): only registered event types; the type list is append-only', (t) => {
+test('audit events (v2–v6): only registered event types; the type list is append-only', (t) => {
   const { db } = freshDb(t, 'transaction');
   const types = db.prepare('SELECT event_type FROM audit_event_type ORDER BY event_type').all().map((r) => r.event_type);
-  assert.deepEqual(types, ['support.customer_search', 'support.customer_view']);
+  assert.deepEqual(types, ['ledger.integrity_mismatch', 'outbox.requeued', 'reconciliation.mismatch', 'reconciliation.unresolved',
+    'risk.decision_rejected', 'support.customer_search', 'support.customer_view', 'support.operations_view',
+    'transfer.expired', 'transfer.reconciled', 'transfer.reconciled_not_posted', 'transfer.requested', 'transfer.risk_approved', 'transfer.risk_declined',
+    'transfer.risk_rescreen', 'transfer.settled', 'transfer.settlement_failed', 'transfer.settlement_started', 'transfer.settlement_unknown']);
   const ins = db.prepare(`INSERT INTO audit_event (event_id, actor_type, actor_id, event_type, occurred_at) VALUES (?, 'ops_user', 'ops_1', ?, ${T0})`);
   ins.run('aud_ok', 'support.customer_search');
   assertRejected(() => ins.run('aud_new', 'ops.account_view'), 'unknown audit event type');

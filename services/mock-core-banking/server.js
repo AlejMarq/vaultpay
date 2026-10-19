@@ -2,9 +2,11 @@
 //
 // Owns: data/secrets/mock-core-banking.env (its server certificate/key, the CA, and the
 // credential CBI must present) and the only connection to data/db/mock-core-banking.db
-// (read-only in Step 4A). Listens on 127.0.0.1 only.
+// (writable since Step 7: postings). Listens on 127.0.0.1 only.
 //
 // Port: VAULTPAY_MOCK_BANK_PORT (default 4100; 0 = any free port, used by tests).
+// VAULTPAY_MOCK_BANK_POST_DELAY_MS (fault injection for tests/demo): answer postings this
+// many ms after committing them, so callers time out with the money already moved.
 
 import { defaultDataDir } from '../../lib/server/db/definitions.js';
 import { openMockCoreBankingDb } from '../../lib/server/db/index.js';
@@ -20,7 +22,7 @@ let config;
 let db;
 try {
   config = loadProcessEnv('mock-core-banking', { dataDir, required: ['MOCK_CORE_BANKING_API_KEY'] });
-  db = openMockCoreBankingDb({ dataDir, readonly: true });
+  db = openMockCoreBankingDb({ dataDir });
 } catch (err) {
   console.error(`mock Core Banking cannot start: ${err.code ?? 'ERROR'} – ${err.message}`);
   process.exit(1);
@@ -30,6 +32,7 @@ const server = createMockCoreBankingServer({
   tls: config.tls,
   apiKey: config.values.MOCK_CORE_BANKING_API_KEY,
   db,
+  postResponseDelayMs: Number(process.env.VAULTPAY_MOCK_BANK_POST_DELAY_MS ?? 0) || 0,
   log: (msg) => console.log(`[mock-core-banking] ${msg}`),
 });
 

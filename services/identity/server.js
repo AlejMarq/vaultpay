@@ -9,7 +9,7 @@ import { defaultDataDir } from '../../lib/server/db/definitions.js';
 import { openIdentityDb } from '../../lib/server/db/index.js';
 import { servicePort, SERVICE_HOST } from '../../lib/services/ports.js';
 import { loadProcessEnv, requireNode22 } from '../../lib/services/process-env.js';
-import { privateKeyFrom } from '../../lib/services/service-token.js';
+import { privateKeyFrom, publicKeyFrom } from '../../lib/services/service-token.js';
 
 import { createIdentityServer } from './app.js';
 
@@ -19,9 +19,11 @@ const dataDir = defaultDataDir();
 let config;
 let db;
 let signingKey;
+let riskPublicKey;
 try {
-  config = loadProcessEnv('identity', { dataDir, required: ['SERVICE_TOKEN_SIGNING_KEY', 'SERVICE_TOKEN_KEY_ID'] });
+  config = loadProcessEnv('identity', { dataDir, required: ['SERVICE_TOKEN_SIGNING_KEY', 'SERVICE_TOKEN_KEY_ID', 'RISK_DECISION_PUBLIC_KEY', 'RISK_DECISION_KEY_ID'] });
   signingKey = privateKeyFrom(config.values.SERVICE_TOKEN_SIGNING_KEY);
+  riskPublicKey = publicKeyFrom(config.values.RISK_DECISION_PUBLIC_KEY);
   db = openIdentityDb({ dataDir, readonly: true });
 } catch (err) {
   console.error(`Identity service cannot start: ${err.code ?? 'ERROR'} – ${err.message}`);
@@ -33,12 +35,14 @@ const server = createIdentityServer({
   signingKey,
   keyId: config.values.SERVICE_TOKEN_KEY_ID,
   identityDb: db,
+  riskPublicKey,
+  riskKeyId: config.values.RISK_DECISION_KEY_ID,
   log: (msg) => console.log(`[identity] ${msg}`),
 });
 
 server.listen(servicePort('identity'), SERVICE_HOST, () => {
   const { address, port } = server.address();
-  console.log(`[identity] listening on https://${address}:${port} (mTLS, clients: vaultpay-web)`);
+  console.log(`[identity] listening on https://${address}:${port} (mTLS, clients: vaultpay-web → balance tokens, vaultpay-settlement → settlement tokens, vaultpay-recon → reconciliation tokens)`);
 });
 
 const shutdown = () => server.close(() => {

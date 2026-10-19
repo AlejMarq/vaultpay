@@ -17,20 +17,25 @@ import { pkiFile } from './setup.mjs';
 
 const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
 
-export async function servicesHarness(t) {
+export async function servicesHarness(t, { bankTimeoutMs = 1500 } = {}) {
   const h = await authHarness(t);
   const { dataDir } = h;
 
   const bankEnv = loadProcessEnv('mock-core-banking', { dataDir });
-  const bankDb = openMockCoreBankingDb({ dataDir, readonly: true });
-  const bank = createMockCoreBankingServer({ tls: bankEnv.tls, apiKey: bankEnv.values.MOCK_CORE_BANKING_API_KEY, db: bankDb });
+  // The bank's own (writable, Step 7 postings) connection; `bankDelay.ms` delays posting answers.
+  const bankDb = openMockCoreBankingDb({ dataDir });
+  const bankDelay = { ms: 0 };
+  const bank = createMockCoreBankingServer({ tls: bankEnv.tls, apiKey: bankEnv.values.MOCK_CORE_BANKING_API_KEY, db: bankDb, postResponseDelayMs: () => bankDelay.ms });
   const bankPort = await listen(bank);
 
   const identityEnv = loadProcessEnv('identity', { dataDir });
   const identityDb = openIdentityDb({ dataDir, readonly: true });
   const signingKey = privateKeyFrom(identityEnv.values.SERVICE_TOKEN_SIGNING_KEY);
   const keyId = identityEnv.values.SERVICE_TOKEN_KEY_ID;
-  const identity = createIdentityServer({ tls: identityEnv.tls, signingKey, keyId, identityDb });
+  const identity = createIdentityServer({
+    tls: identityEnv.tls, signingKey, keyId, identityDb,
+    riskPublicKey: publicKeyFrom(identityEnv.values.RISK_DECISION_PUBLIC_KEY), riskKeyId: identityEnv.values.RISK_DECISION_KEY_ID,
+  });
   const identityPort = await listen(identity);
 
   const cbiEnv = loadProcessEnv('cbi', { dataDir });
@@ -39,7 +44,7 @@ export async function servicesHarness(t) {
     tls: cbiEnv.tls,
     tokenPublicKey: publicKeyFrom(cbiEnv.values.SERVICE_TOKEN_PUBLIC_KEY),
     keyId,
-    bank: loadCoreBankingClient({ dataDir, port: bankPort, timeoutMs: 1500 }),
+    bank: loadCoreBankingClient({ dataDir, port: bankPort, timeoutMs: bankTimeoutMs }),
     replayCache,
   });
   const cbiPort = await listen(cbi);
@@ -71,7 +76,7 @@ export async function servicesHarness(t) {
   });
 
   return {
-    ...h, bank, identity, cbi, bankPort, identityPort, cbiPort, signingKey, keyId, replayCache,
+    ...h, bank, identity, cbi, bankPort, identityPort, cbiPort, signingKey, keyId, replayCache, bankDb, bankDelay,
     webCredentials, certOf, sessionTokenOf, call, close,
     balanceDeps: (browser) => ({ sessionToken: sessionTokenOf(browser), credentials: webCredentials, identityPort, cbiPort, timeoutMs: 2000 }),
   };

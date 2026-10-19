@@ -16,7 +16,7 @@ test('each process receives only its own keys', async (t) => {
   const holders = (key) => PROCESSES.filter((p) => key in env(dataDir, p));
   assert.deepEqual(holders('SERVICE_TOKEN_SIGNING_KEY'), ['identity']);
   assert.deepEqual(holders('RISK_DECISION_SIGNING_KEY'), ['fraud']);
-  assert.deepEqual(holders('RISK_DECISION_PUBLIC_KEY'), ['settlement']);
+  assert.deepEqual(holders('RISK_DECISION_PUBLIC_KEY'), ['identity', 'orchestrator', 'settlement']);
   assert.deepEqual(holders('BETTER_AUTH_SECRET'), ['web']);
   assert.deepEqual(holders('MOCK_CORE_BANKING_API_KEY'), ['cbi', 'mock-core-banking']);
   assert.deepEqual(holders('MOCK_FRAUD_SCORING_API_KEY'), ['fraud', 'mock-fraud-scoring']);

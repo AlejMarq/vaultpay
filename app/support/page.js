@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import { requireSupport } from '@/lib/server/session';
 
 import { SessionKeepAlive, SignOutButton } from '../session-controls';
@@ -19,6 +21,7 @@ export default async function SupportPage() {
         <SignOutButton />
       </header>
       <p className="muted">Signed in as {viewer.ops.fullName} – {viewer.ops.role}. You can view customer records but not change them.</p>
+      <p><Link href="/operations">Operations overview (read-only)</Link></p>
       <LookupForm />
     </main>
   );

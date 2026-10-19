@@ -62,6 +62,37 @@ Assignment 5" and "Known limitations" sections are built from it.
 | D44 | 2026-10-19 | How Next.js gets a balance token | Next.js requests a token for an account | **Changed (AI, within my requirement: no generic endpoint, no caller-chosen account)** | One purpose-specific endpoint: Next.js presents the **customer's own session token** over mTLS; Identity validates session, MFA marker, active customer and active wallet in its read-only DB and takes the account from the wallet record. Fixed `aud`/`sub`/`scope`; 30 s; `cnf` binding; single-use `jti`. |
 | D45 | 2026-10-19 | Next.js's service identity | Reuse the Reconciliation certificate | **Changed (AI)** | Separate client certificate `vaultpay-web` for Identity and CBI calls; `vaultpay-recon` stays for reconciliation. Identity gets a server certificate `vaultpay-identity`. |
 | D46 | 2026-10-19 | Upgrading existing installations | `--rotate-secrets` / `--renew-certs` | **Changed (AI)** – rotation would break TOTP enrollments | `npm run setup` moves the signing key unchanged from `web.env` to `identity.env` (backup kept) and issues only the *new* certificates from the existing CA; a half-present certificate is still refused. Verified on the home PC (same key id, same Better Auth secret). |
+| D47 | 2026-10-19 | Who writes transfers (Step 5) | The Orchestrator & Ledger (inside Next.js, D1) | **AI proposal, within my requirement** (narrow writer, reuse existing patterns) | `lib/server/transfer-orchestrator.js`: own writable connection, one operation `create()`; a static test allows writable transaction-DB connections only here and in the audit writer, and forbids `UPDATE transfer`, ledger, settlement and risk inserts in Next.js code. |
+| D48 | 2026-10-19 | Atomicity and recovery | Transfer, `transfer.requested` audit event and `fraud_check` outbox message in one `BEGIN IMMEDIATE` transaction | **My requirement** (one DB transaction, durable outbox) | Outbox (307) is the recovery mechanism for Step 6: an accepted transfer always has a pending message; a failure leaves no row at all (tested by forcing the outbox insert to fail). |
+| D49 | 2026-10-19 | Idempotency | Database only: existing `UNIQUE(sender_wallet_id, idempotency_key)`; same key + same payee/amount/currency → the stored transfer; different payload → `idempotency_conflict` | **My requirement** (no in-memory idempotency) | No new column needed: the payload is compared with the stored row inside the write transaction; a unique-constraint race from another connection is answered from the winning row. Key = random UUID issued at review, one per intended transfer. |
+| D50 | 2026-10-19 | Preliminary funds check | CBI balance minus this wallet's transfers in `pending_risk` / `pending_settlement` / `settlement_in_flight` (holds), computed inside the write transaction | **AI proposal** – Core Banking balances do not change until settlement, so without holds two pending transfers could spend the same money | Fails closed if the balance is unavailable; a replay of an already-recorded key is answered from the DB without the bank. The bank posting (Step 7) must enforce funds independently. |
+| D51 | 2026-10-19 | Limits and lifecycle | $0.01–$1,000.00 business limit (separate from the DB ceiling, D16); 1-hour `pending_expires_at`; new transfers `pending_risk` only | **AI proposal** | `TRANSFER_TRANSITIONS` in code mirrors the DB trigger (a test checks all 42 status pairs against the database). |
+| D52 | 2026-10-19 | Recipient and source wallet | Recipient by email, active customer + active wallet; one generic refusal; review does not look the recipient up; source wallet = server-resolved active wallet, which must also be the wallet the balance flow uses | **AI proposal** (privacy: no account enumeration at review, no recipient name shown) | The browser's `sourceWalletId` is only compared, never used; a customer whose first wallet is not the active one cannot send (fails closed, see limitations). Recipients need not have approved KYC. |
+| D53 | 2026-10-19 | Form flow | Two-step Server Action (`intent` review → confirm); results via `useActionState`; fixed error codes mapped to messages in the client | **AI proposal** | Eligibility is re-checked in the action, again at the start of `initiateTransfer`, and once more synchronously right before the write (after the balance call). |
+| D54 | 2026-10-19 | Fraud & Risk process (Step 6) | Separate Node.js HTTPS process `services/fraud/`, 127.0.0.1:4400, no database, only holder of the risk-decision signing key; new server certificate `vaultpay-fraud` | **My requirement** (separate process, own credentials) | Accepts only `CN=vaultpay-orchestrator`; strict request schema; `400` without signing anything for invalid requests. |
+| D55 | 2026-10-19 | Who consumes the outbox | A separate worker command `npm run fraud-worker` (Orchestrator role, D1) with its own `orchestrator.env` (risk-decision **public** key, client certificate `vaultpay-orchestrator`) | **AI proposal** – a request-driven Next.js process cannot run a durable background loop; the Orchestrator's writer stays outside the browser path | Next.js imports neither the worker nor the fraud signer (static test). |
+| D56 | 2026-10-19 | Decision format | Compact JWS (jose, EdDSA), `typ vaultpay-risk-decision+jwt`, `kid`, `iss vaultpay-fraud`, `aud vaultpay-orchestrator`, `sub`/`transfer` binding, `req` request binding, `jti` decision id, 10-minute `exp` | **AI proposal, within my requirement** (bind transfer id, parties, amount, currency, outcome; iat/exp/unique id) | Different key and `typ` from service tokens, so neither can pass for the other (tested). Stored verbatim in `risk_decision.signature` for Settlement to re-verify in Step 7. |
+| D57 | 2026-10-19 | Concurrency and crash safety | Database leases on `outbox_message` (`leased`, `lease_until`, `attempts`), `attempts` as fencing token, `BEGIN IMMEDIATE` for claim and apply | **My requirement** (durable claims, not memory) | No schema change needed: the Step 2 outbox columns (D8) suffice. Lease 30 s; backoff 1 s × 2ⁿ up to 60 s; `dead` after 10 attempts – the transfer then stays `pending_risk`. |
+| D58 | 2026-10-19 | Mock engine rules | Deterministic: decline at ≥ `VAULTPAY_FRAUD_DECLINE_AT_CENTS` (default $250.00), same wallet, block list (`VAULTPAY_FRAUD_BLOCKED_PAYEES`), implausible time; else approve with score ∝ amount | **AI proposal** – default below Alice's $500 so both outcomes can be shown | Thresholds are demo settings in the Fraud process environment, not secrets. The external "mock fraud scoring" vendor (Step 2 key) is not used. |
+| D59 | 2026-10-19 | After approval | Same apply transaction enqueues a `settlement` outbox message | **AI proposal** (recovery mechanism for Step 7; no settlement implemented) | Declines enqueue nothing and stop holding funds. |
+| D60 | 2026-10-19 | Upgrade path | `npm run setup` adds TLS paths to `fraud.env`, creates `orchestrator.env` from the existing signing key's public half (old `fraud.env` backed up), issues `fraud` + `orchestrator` certificates from the existing CA, migrates transaction DB to v4 | **AI proposal** (as D46) | Verified on the home PC: risk-decision key id `rd-056ea85a88f059dd` kept. |
+| D61 | 2026-10-19 | Settlement process (Step 7) | Separate HTTPS process `services/settlement/`, 127.0.0.1:4500, one endpoint for one caller (`vaultpay-orchestrator`), no database, no bank credential; new server certificate `settlement-server` (CN `vaultpay-settlement`) because the Step 2 `settlement` certificate is client-only | **My requirement** (own server certificate, narrow interface) | Re-verifies the approval itself before asking Identity. |
+| D62 | 2026-10-19 | Settlement token issuance | Identity `POST /v1/service-tokens/settlement` for `vaultpay-settlement` only; input = the fraud approval + idempotency key; Identity verifies the approval (new: risk-decision public key in `identity.env`) and maps parties to bank accounts itself | **My requirement** (purpose-specific, bound to transfer, accounts, amount, currency, key) – the design detail (approval as the authorization) is the AI's | A compromised Settlement can get tokens only for transfers Fraud & Risk approved, and only to the parties' own accounts. |
+| D63 | 2026-10-19 | CBI posting | `POST /v1/postings`, token only, no body; posting details only from the token; separate scope per caller; balance and posting routes refuse each other's caller | **My requirement** | `504 {outcome:"unknown"}` for every non-definitive bank result. |
+| D64 | 2026-10-19 | Bank idempotency and funds | Bank checks the idempotency key FIRST (original result or `409` on a different payload), then active accounts and funds, then debit/credit/posting in one `BEGIN IMMEDIATE` transaction; schema guards as a second line (`balance_cents >= 0`, active-account trigger) | **My requirement** | Refusals are not recorded at the bank; a retry after a lost refusal is evaluated again (it can never move money twice). |
+| D65 | 2026-10-19 | Unknown outcomes | Retry with the SAME key while the approval is valid; if it expires while unknown → message `dead`, `needs_reconciliation`, transfer stays `settlement_in_flight` (never failed by guesswork) | **My requirement** (same key, no new posting) – parking instead of an expired-approval retry is the AI's choice | Reconciliation (Step 8 scope) resolves parked transfers. |
+| D66 | 2026-10-19 | "Refused before the bank" | Definitive (transfer `failed`) only when the attempt was created in the same claim – its key had never been sent; otherwise treated as unknown | **AI proposal** – an earlier, unanswered send with that key may have posted | Keeps a frozen-wallet refusal from leaving money in limbo, without ever risking a false failure. |
+| D67 | 2026-10-19 | Ledger and completion guards | Migration 0005: ledger ↔ bank posting reference, credit-after-debit, completed/failed need the matching attempt, settlement message of a completed transfer needs exactly one debit and one credit; `ledger_totals` view | **AI proposal, within my requirement** (balanced entries, no duplicates, linked to posting ids) | Historical migrations untouched; SQLite cannot defer a check to COMMIT, so balance is enforced at the outbox-completion step of the same transaction. |
+| D68 | 2026-10-19 | Test/demo knobs | `VAULTPAY_MOCK_BANK_POST_DELAY_MS` (bank answers after committing – simulated lost response) and `VAULTPAY_SETTLEMENT_LEASE_MS` (shorter lease to show crash recovery quickly) | **AI proposal** | Mock bank and worker only; documented; defaults off / 60 s. |
+| D69 | 2026-10-19 | Where reconciliation runs | Its own process `npm run reconcile` with `recon.env` (the Step 2 `vaultpay-recon` client certificate); the certificate paths move out of `web.env` | **My requirement** (Next.js isolated from privileged service credentials) – D1 had Reconciliation inside Next.js | Next.js now holds exactly one service identity (`vaultpay-web`). Upgrade moves the paths in place (D46 style). |
+| D70 | 2026-10-19 | How the bank is asked | Purpose-specific read-only lookup: Identity `…/reconciliation` token (`records:read`, accounts from Identity's records) → CBI `POST /v1/postings/lookup` (no body) → bank `GET /v1/postings/{key}`; CBI compares and returns posted / not_found / mismatch / unknown, never accounts | **My requirement** (through CBI, narrowly scoped, existing Identity tokens) | Lookup by the attempt's own key only – reconciliation cannot post or choose another key. |
+| D71 | 2026-10-19 | When a missing posting may fail a transfer | Only if no message for the transfer is leased (even expired) and none was active for 2 min; otherwise unresolved | **AI proposal** – a worker that still holds a lease could be sending the key | Ambiguous transfers keep their funds reserved until the bank confirms either way.  **Superseded by D76 (Step 9).** |
+| D72 | 2026-10-19 | Mismatches and integrity | `reconciliation_result` `mismatched` recorded once per transfer, transfer left in flight; ledger issues audited every pass, never corrected | **My requirement** (flag, do not silently correct) | Shown on `/operations` as exceptions / integrity issues. |
+| D73 | 2026-10-19 | Expiry and requeue | Expiry only for `pending_risk`/`pending_settlement` without `settlement_attempted_at` and without a live lease (the D5 CHECK forbids anything else); requeue only behind `--requeue-dead --once`, only for not-yet-sent transfers, as a NEW message | **AI proposal, within my requirement** (preserve leases, fencing, idempotency) | Parked messages stay as they are (append-only history); in-flight settlements are never requeued. |
+| D74 | 2026-10-19 | Operations page | `/operations` for MFA-verified `support_readonly` only; read-only connection; no forms or actions; transfer ids and aggregates only; each view audited (`support.operations_view`) before data | **My requirement** | Next renders the page twice per full load; views are de-duplicated per session for 2 s (see Problems). |
+| D75 | 2026-10-19 | Test/demo knob | `VAULTPAY_RECONCILE_MIN_AGE_MS` (default 120000) | **AI proposal** | Lets the real-process checks and the demo reconcile within seconds. |
+| D76 | 2026-10-19 | Step 9 review: "no posting found" | Never fails a transfer. Left unresolved (audit `reconciliation.unresolved`), funds reserved; the next pass completes it if the posting appears; otherwise manual resolution with the bank | **My requirement** ("if it cannot be guaranteed, keep it unresolved") after the AI's analysis showed the D71 conditions are not a guarantee | Released lease ≠ finished request: CBI stops waiting after 3 s, but a request already inside the bank commits when it gets its SQLite lock (up to 5 s busy timeout) or after any process pause. Regression test races a late posting with reconciliation. |
+| D77 | 2026-10-19 | Step 9 review: bank refusal after an unanswered send | `rejected` is definitive only for an attempt created in the same claim (key sent exactly once); otherwise treated as unknown and retried with the same key | **AI proposal** (same race as D76, found in the same review) | Otherwise an earlier copy of the request could post after the refusal and leave a `failed` transfer debited at the bank. Regression test. |
 
 ### D1 notes – why each process exists
 - **Next.js app** – required stack; hosts UI, API routes, Identity, Orchestrator & Ledger (+ background loop), Ops Support, Reconciliation & Audit.
@@ -97,6 +128,14 @@ Assignment 5" and "Known limitations" sections are built from it.
 | Mock Core Banking balances | Separate mock Core Banking database (Step 2, later section) | D7 – Core Banking stays the source of truth for balances |
 | Auth.js sessions as Next.js Middleware on every request | Better Auth through Server Actions; Next.js 16 `proxy.js` only redirects when no cookie is present; all authorization in the server-side DAL | Next.js 16 renamed Middleware to Proxy and documents it as unsuitable for authorization (D26) |
 | Ops Support reports access to Reconciliation & Audit, which writes the audit event | A separate append-only audit writer inside the Next.js process (own connection, one INSERT) | Reconciliation & Audit runs inside Next.js (D1); separation is by connection and API, not process (D35) |
+| Transfer API idempotency via a request header | Idempotency key is a hidden form field issued by the server at review; uniqueness and payload match enforced by the transaction database | Server Actions instead of an HTTP API (D26, D53) |
+| Funds check before accepting a transfer | Preliminary check: Core Banking balance minus pending transfers (D50); the bank posting enforces funds again | Core Banking is the source of truth (D7) and is only debited at settlement |
+| Orchestrator runs inside Next.js | The fraud outbox consumer runs as its own process (`npm run fraud-worker`); the transfer writer for `/send` stays in Next.js | Background processing needs a long-running process (D55) |
+| Fraud & Risk calls an external scoring vendor | Deterministic built-in rules; the mock scoring key from Step 2 is unused | A demo that always gives the same, explainable answer (D58) |
+| Settlement holds the risk-decision public key and calls Identity for a settlement token | As designed, plus Identity also verifies the approval before issuing (D62) | Defense in depth: neither Settlement nor Identity alone can start a posting without a fraud approval |
+| Ledger entries keyed by `wallet_id` | `account_type`/`account_id` (Step 2) plus `core_banking_ref` linking each entry to the bank posting (migration 0005) | Requirement to link ledger records to bank posting ids |
+| Reconciliation & Audit runs inside Next.js (D1) | A separate `npm run reconcile` process with its own certificate file | Keeps Next.js free of any second service credential (D69) |
+| Ops Portal with operational actions | Read-only `/operations` for support; recovery actions only as an operator command on the server | Support stays read-only (Step 3 requirement); no transfer, settlement or KYC actions in the browser |
 | Money-moving routes require "MFA or step-up" | Every protected page requires that the *current session* completed TOTP or a backup code; no step-up yet | Simpler and stricter for the demo (D30) |
 
 ---
@@ -128,6 +167,18 @@ Assignment 5" and "Known limitations" sections are built from it.
 | 2026-10-19 | 3E: a failed attempt's claim release matched on `claimed_at`; with two claims in the same millisecond (or a repeated release) it could delete another request's successful claim and reopen the code | Random claim token + one-shot release (identity migration 0003); regression test fails on the old code |
 | 2026-10-19 | 3F review: **DNS rebinding** – a site resolving its own name to 127.0.0.1 could send "same-origin" Server Actions (`Host` and `Origin` both `evil.example`) and sign in to the published demo accounts from a victim's browser | Localhost `Host` allowlist in every Server Action, in session resolution and in `/api/health`; HTTP test sends real requests with a foreign Host – all three checks fail without the fix |
 | 2026-10-19 | Test-only bugs found while writing HTTP checks: picking the page's first form (Sign out) instead of the lookup form; the rate-limit check locking Carol before her enrollment; random KYC timestamps making "later" records older | Forms selected by content; rate-limit check runs last; strictly increasing KYC timestamps (3 consecutive clean runs) |
+| 2026-10-19 | Step 5: two existing tests hard-coded transaction schema v2 and the audit type list | Updated to v3 / `transfer.requested` (expected change, not a regression) |
+| 2026-10-19 | Step 5 HTTP checks: a `redirect()` inside a Server Action arrives as a real `303` for a no-JS POST (not an in-page `NEXT_REDIRECT`), so the first version read no redirect target | Check helper reads the `Location` header (`redirectOf`); no app change |
+| 2026-10-19 | Step 5 test cleanup: a test connection closed with `t.after` hit `EBUSY` on Windows | Uses `onCleanup` (last-in-first-out), as the other tests do |
+| 2026-10-19 | Step 6: the AI's shell tool rewrote `\\n` inside heredocs into real newlines, which broke a generated JavaScript string (`join('\n')`) and a regex in the HTTP check | Caught by lint and a failing check; patches written with the editor tool instead of shell heredocs |
+| 2026-10-19 | Step 6: four existing tests hard-coded the certificate list, process files, the risk public-key holders and schema v3 | Updated to the new `fraud`/`orchestrator` certificates, `orchestrator.env` and v4 (expected change) |
+| 2026-10-19 | Step 7: the Step 4B upgrade path built `identity.env` from a spec that now includes the risk-decision public key, which a pre-4B install does not have (crash in the upgrade test) | Older upgrades skip settings that a later upgrade adds; the Step 7 upgrade fills each missing part independently (regression: `upgrade-4b`, `upgrade-7` tests) |
+| 2026-10-19 | Step 7: the first expired-approval test moved the test clock and fed it to the in-process Fraud service, so Identity (real clock) saw approvals issued in the future | Test uses an injectable approval margin and a genuinely old signed approval instead of shifting service clocks |
+| 2026-10-19 | Step 7: settlement tests failed intermittently (2 of ~15 full `npm test` runs) – the shared test harness gave CBI only 1.5 s for the bank, so under full-suite load a normal posting sometimes came back "unknown" and was (correctly) retried instead of completing in one run | Settlement harness uses the production 3 s bank deadline (timeout test delays 4 s); recovery steps allow bounded retries and assert the end state (completed, one posting). 9 consecutive clean runs afterwards. Not a product defect: the worker behaved as designed |
+| 2026-10-19 | Step 7: existing schema and seed tests inserted ledger rows without a bank reference, postings with positional columns, and expected v4 | Updated to the v5/v2 guards (expected change); new tests for each new trigger |
+| 2026-10-19 | Step 8: one full page load of `/operations` wrote two `support.operations_view` rows – Next 16 (Cache Components) renders the page twice for one request; the same happens to `/wallet`'s balance call (two log lines per load, seen since Step 4). React `cache()` did not span the two passes | Views recorded once per session within 2 s (in-memory de-duplication only; the record is still written before the first data, and an audit failure still stops the page). HTTP check: one row per load, a new row on a later reload |
+| 2026-10-19 | Step 8: first versions of three reconciliation tests had setup mistakes (a "too recent" check that the real bank delay had already outlived; an expiry scenario whose helper approved every pending transfer; an assertion on a transfer id the overview deliberately does not list) | Test setup corrected; no product change |
+| 2026-10-19 | **Step 9 review – correctness defect:** reconciliation marked a transfer `failed` when the bank had no posting for its key and no worker had touched it for 2 minutes. That is not authoritative: a request already delivered to the bank can commit later (lock wait, pause), leaving a failed transfer debited with no ledger entry. The same race existed for a bank refusal received on a retry | D76, D77: absence never fails a transfer; a refusal fails only a first-and-only send. Two regression tests (late posting after a "not found" lookup; refusal after an unanswered send) and the real-process check updated |
 | 2026-10-18 | Smoke test section 6 prints `ERROR [Better Auth]: Database schema mismatch – Missing tables session, account, verification, twoFactor` | Not a failure: `betterAuth()` checks the schema when initialized, and the test initializes it on an empty database before running migrations. The following checks confirm the migrations created all five tables and all 7 checks passed. The app must run migrations in `npm run setup` before startup. Test left unchanged |
 
 ---
@@ -169,6 +220,88 @@ Server Action form POSTs.
 | D7 | No Next.js code opens the mock Core Banking database | Pass | 2026-10-19 |
 | Build hygiene | No runtime data in build traces; build fails if prerendering reaches the database | Pass | 2026-10-18 |
 
+Step 5 tests (transfers): `tests/app/transfers.test.mjs` (real Identity, CBI and mock bank
+in-process, real databases; worker threads for concurrent connections) and the
+"Send money: transfers" section of `npm run test:http` (real processes, real form POSTs).
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| Happy path | Alice → Bob $12.50: one `pending_risk` transfer, one `transfer.requested` audit event, one `fraud_check` outbox message, no ledger rows; shown as pending to Alice and Bob, not to Carol | Pass | 2026-10-19 |
+| Eligibility | Carol (KYC pending / rejected), support (wrong role), password-only session, frozen wallet, suspended customer refused – page, action replay and library; a freeze/KYC change during the balance call still stops the write | Pass | 2026-10-19 |
+| Input validation | Invalid amounts (`abc`, `12.345`, `-5`, `1e2`, `1,000`, `01`), limits ($0 and $1,000.01), self-transfers (any case), malformed keys, number-typed fields refused; float pitfalls (`0.29`, `1.15`) parsed exactly | Pass | 2026-10-19 |
+| Isolation (120) | Another customer's wallet as `sourceWalletId` refused; unknown, staff, suspended and frozen recipients get one identical answer; review never looks the recipient up; no recipient name, customer id or bank data in responses | Pass | 2026-10-19 |
+| Funds | Over balance refused; pending transfers held (400 + 100.01 > 500 refused); Carol $100.01 refused over HTTP | Pass | 2026-10-19 |
+| Idempotency (282) | Same key → same transfer (sequential, 10 parallel in-process, 5 parallel HTTP POSTs, 6 worker-thread connections); different amount or recipient → conflict; key scoped per sender | Pass | 2026-10-19 |
+| Concurrency | 6 concurrent $200 transfers on separate connections against $490 available: exactly 2 accepted | Pass | 2026-10-19 |
+| Fail closed | Bank or CBI down, malformed/foreign-currency/frozen balance → not accepted, nothing written, same key kept; an already-recorded key still answers from the DB | Pass | 2026-10-19 |
+| Atomicity (307) | Forced outbox failure and a read-only connection: no transfer, audit or outbox row; error stays in the server log; retry with the same key creates exactly one | Pass | 2026-10-19 |
+| Lifecycle | Code transition table equals the DB trigger for all status pairs; inserts other than `pending_risk` refused; nothing reported or stored as completed | Pass | 2026-10-19 |
+| CSRF / rebinding | Foreign-Origin, missing-Origin and foreign-Host transfer POSTs refused, nothing written | Pass | 2026-10-19 |
+| D7 / keys | Static check: no Next.js code opens the bank DB or names the signing key or bank credential | Pass | 2026-10-19 |
+
+Step 6 tests (fraud screening): `tests/services/fraud.test.mjs` (real mTLS Fraud & Risk
+in-process, real databases), `npm run test:fraud` (real Fraud & Risk process and worker
+command, three concurrent worker processes), the "Fraud screening" section of
+`npm run test:http`, and `tests/setup/upgrade-6.test.mjs`.
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| Approve / decline | $12.50 → `pending_settlement` + decision + `transfer.risk_approved` + settlement outbox; $300.00 → `declined` + `transfer.risk_declined`, no settlement message; `/wallet` shows *Pending – awaiting settlement* / *Declined* (HTTP) | Pass | 2026-10-19 |
+| 82 – forged / tampered | Edited outcome, amount, payee, request id or expiry → signature fails; another installation's key, Identity's service-token key, wrong `typ`, unknown `kid`, extra claims, over-long lifetime refused | Pass | 2026-10-19 |
+| Binding | Decision for another transfer, amount, payee, sender or payee type → `wrong_transfer`; for another or older request → `wrong_request` | Pass | 2026-10-19 |
+| Expired / replayed / duplicate | Expired decision refused; transfer A's approval replayed for B refused; reused decision id refused by the primary key; duplicate `fraud_check` delivery skipped without asking Fraud & Risk | Pass | 2026-10-19 |
+| Concurrency | 3 in-process workers (separate connections) and 3 worker processes: every transfer screened and applied exactly once, every message `done` with 1 attempt | Pass | 2026-10-19 |
+| Crash / retry | Abandoned claim recovered after the lease; a stale worker holding a valid decision is fenced out (`lease_lost`); a failure inside the apply transaction rolls back decision, status, audit and outbox | Pass | 2026-10-19 |
+| Outage | Fraud & Risk down, `500`, or `200` without a decision → `pending_risk`, backoff, screened once the service is back; `dead` after 10 attempts, still `pending_risk` | Pass | 2026-10-19 |
+| Caller isolation | Fraud & Risk refuses `vaultpay-web`; the worker refuses a server with another service's certificate; Next.js code imports no fraud/worker code and no risk key | Pass | 2026-10-19 |
+| Leakage | Worker and service logs and `/wallet` contain no JWS, decision id, score, rule or key | Pass | 2026-10-19 |
+
+Step 7 tests (settlement): `tests/services/settlement.test.mjs` (all services in-process
+over real mTLS), `npm run test:settlement` (five service processes and both worker
+commands, fresh temporary install), the "Settlement" section of `npm run test:http`
+(browser flow), `tests/db/transaction-schema.test.mjs` (v5 guards) and
+`tests/setup/upgrade-7.test.mjs`.
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| Payment | Alice → Bob $12.50: approved, posted, `completed`; bank and `/wallet` (Identity → CBI) show **$487.50 / $262.50**; one debit + one credit sharing the bank posting reference; audit trail requested → approved → started → settled | Pass | 2026-10-19 |
+| Bank enforcement | $600.00 with fraud passing → bank `insufficient_funds` → `failed`, nothing moved; recipient account frozen at the bank → `failed`; VaultPay wallet frozen after approval → Identity refuses → `failed`, no bank call | Pass | 2026-10-19 |
+| 282 – idempotency | Bank answers after committing while CBI times out → `unknown`, transfer in flight; retry with the same key → original posting, one posting, money moved once (in-process and real processes); duplicate settlement message skipped | Pass | 2026-10-19 |
+| Crash recovery | Worker gone after recording the attempt, and after the bank posted (real process killed): lease expires, next run completes with the same key, one posting | Pass | 2026-10-19 |
+| Concurrency | 3 in-process workers and 3 worker processes × 6 transfers: each completed once, one posting each, balances exact, ledger balanced | Pass | 2026-10-19 |
+| D5 / approvals | Approval with < 60 s left or genuinely expired → back to `pending_risk` + new `fraud_check`, re-approved, settled; a stored approval for another amount → re-screen, never posted; unknown outcome after approval expiry → `dead` / `needs_reconciliation`, still in flight | Pass | 2026-10-19 |
+| Tokens | Identity: only `vaultpay-settlement`, only for a genuine unexpired approval, only two body fields; tampered/declined/expired approvals refused. CBI: body refused, Next.js refused, tampered, expired, wrong scope, wrong audience, other-certificate and same-account tokens refused; single use (replay `401`); settlement token cannot read balances | Pass | 2026-10-19 |
+| Ledger | Debit/credit totals equal; posting without the settled bank reference, credit before debit, completing without both entries, UPDATE/DELETE all refused | Pass | 2026-10-19 |
+| Leakage | `/wallet` and logs contain no bank account, posting reference, idempotency key, token or key | Pass | 2026-10-19 |
+
+Step 8 tests (operations): `tests/services/reconciliation.test.mjs` (all services in-process
+over real mTLS), `npm run test:reconcile` (real processes and the `reconcile` command), the
+"Operations overview" section of `npm run test:http`, `tests/setup/upgrade-8.test.mjs`, and
+static checks that `/operations` has no form, action or write statement.
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| Lost bank answer | Bank posted, CBI timed out → in flight; reconcile → completed with exactly one ledger pair and the original posting; Alice $487.50 / Bob $262.50 (real processes); repeated runs and the settlement worker change nothing | Pass | 2026-10-19 |
+| Unknown outcome | CBI down or invalid lookup answers → `unresolved`, still in flight, funds reserved, never failed; CBI back → completed (real processes) | Pass | 2026-10-19 |
+| No posting | Settlement unreachable → in flight; reconcile → failed, nothing moved, funds released; the key is never sent again; a live lease → `busy`, untouched | Pass | 2026-10-19 |
+| Mismatch | Bank record with the same key but another amount → exception recorded once, left in flight, no ledger | Pass | 2026-10-19 |
+| Concurrency | 3 reconcilers (separate connections) and 3 `reconcile` processes: each transfer resolved once, one ledger pair, one posting | Pass | 2026-10-19 |
+| Expiry | Only overdue transfers without a settlement request expire; a leased one waits for the next pass; in-flight never expires; reservations released only on expiry | Pass | 2026-10-19 |
+| Parked messages | Dead fraud/settlement messages listed on `/operations`; `--requeue-dead` (only with `--once`) retries a not-yet-sent transfer as a new message, once; in-flight not requeued | Pass | 2026-10-19 |
+| Ledger integrity | Healthy ledger: no issues; an unbalanced pair is flagged and audited, nothing corrected; ledger/audit UPDATE/DELETE still refused | Pass | 2026-10-19 |
+| Lookup tokens | Only `vaultpay-recon` (Settlement, Next.js refused); strict body; no body at CBI; records token cannot post; settlement token cannot look up; single use; no account in answers; lookups never post | Pass | 2026-10-19 |
+| 244 / operations | `/operations`: support with MFA only (customer → access denied, password-only → MFA, signed out → login); one form (sign-out); every view audited, refused views not; no bank account, posting reference, key, token, wallet id, email or name | Pass | 2026-10-19 |
+| Isolation | `recon.env` holds the Reconciliation certificate, `web.env` no longer does (upgrade test); Next.js imports no worker or service code | Pass | 2026-10-19 |
+
+Step 9 regression tests (final review):
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| 282 / D76 | "No posting found" after 10 quiet minutes → still in flight and reserved, no decision recorded; the original request then reaches the bank → next pass completes it with one ledger pair; never `failed` in between | Pass | 2026-10-19 |
+| 282 / D77 | Bank refusal received on a retry after an unanswered first send → stays in flight; later the same key settles once | Pass | 2026-10-19 |
+| Invariant | Every `failed` transfer's key has no bank posting; every bank posting belongs to a completed transfer | Pass | 2026-10-19 |
+| Real processes | `test:reconcile`: Settlement unreachable → "not found" → in flight and reserved (not failed); Settlement back → the same key settles it once | Pass | 2026-10-19 |
+
 ---
 
 ## 5. Phase status
@@ -179,6 +312,10 @@ Server Action form POSTs.
 | 2 – Setup, databases, PKI, secrets, demo data | Pending (needs Phase 0 laptop steps, then `npm ci` + `npm run setup`) | Done 2026-10-18 (Sections A–C): `npm test` 123 tests – 122 pass, 0 fail, 1 skipped (file symlinks need Developer Mode); `npm run setup` on the existing install added only the mock Core Banking DB and demo data (keys and certificates kept); repeat run kept everything; `npm run setup:check` 11/11 PASS; `NODE_ENV=production` refused; lint, build, smoke test pass | Not yet: login/TOTP UI, transfer endpoints, Fraud/Settlement/CBI services (later steps). `/api/health` still uses an in-memory DB |
 | 3 – Authentication, MFA, roles, KYC | Pending (`git pull`, `npm ci`, `npm run setup` migrates to identity v3 / transaction v2) | Done 2026-10-19 (Sections 3A–3F): `npm test` 218 tests – 217 pass, 0 fail, 1 skipped; `npm run test:http` 134/134; lint, build, smoke, setup, `setup:check` 11/11 PASS; production audit 0 vulnerabilities | Next: Step 4 (Core Banking Integration, balances) and Step 5 (transfers, which must call `requireVerifiedCustomer()` again just before creating a transfer) |
 | 4 – Core Banking integration and balances | Pending (`git pull`, `npm ci`, `npm run setup` – upgrades the secrets layout and issues the new certificates) | Done 2026-10-19 (4A–4C): `npm test` 254 – 253 pass, 0 fail, 1 skipped; `test:http` 144/144 (twice); `test:services` 28/28; `test:mock-bank` 10/10; lint, build, smoke, setup, `setup:check` pass; home PC upgraded in place | Next: Step 5 (transfers) – see "Before Step 5" below |
+| 5 – Transfer initiation | Pending (`git pull`, `npm ci`, `npm run setup` – migrates the transaction DB to v3) | Done 2026-10-19: `npm test` 269 – 268 pass, 0 fail, 1 skipped; `test:http` 170/170; `test:services` and `test:mock-bank` pass; lint, build, smoke, setup (v2 → v3 with backup), `setup:check` pass | Not committed yet. Next: Step 6 (fraud screening from the outbox) |
+| 6 – Fraud screening | Pending (`git pull`, `npm ci`, `npm run setup` – adds fraud/orchestrator credentials, transaction DB v4) | Done 2026-10-19: `npm test` 281 – 280 pass, 0 fail, 1 skipped; `test:http` 178/178; `test:fraud` 13/13; `test:services`, `test:mock-bank`, lint, build, smoke, setup (v3 → v4, credentials upgraded in place), `setup:check` pass | Not committed yet. Next: Step 7 (settlement from the `settlement` outbox) |
+| 7 – Settlement and ledger | Pending (`git pull`, `npm ci`, `npm run setup` – adds the Settlement server certificate, Identity's decision public key, transaction DB v5, bank DB v2) | Done 2026-10-19: `npm test` 292 – 291 pass, 0 fail, 1 skipped; `test:http` 186/186; `test:settlement` 20/20; `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Not committed yet. Next: Step 8 (operations dashboard, reconciliation) |
+| 8 – Operations, reconciliation, recovery | Pending (`git pull`, `npm ci`, `npm run setup` – moves the Reconciliation certificate to `recon.env`, transaction DB v6) | Done 2026-10-19: `npm test` 305 – 304 pass, 0 fail, 1 skipped; `test:http` 197/197; `test:reconcile` 17/17; `test:settlement`, `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Not committed yet. Next: final review and submission packaging |
 
 ### Phase 0 dependency verification – home PC, 2026-10-18
 
@@ -286,3 +423,148 @@ holds another process's secret.
 - **Fraud & Risk Check / Settlement processes** do not exist yet; their certificates and
   keys from Step 2 are unused so far (`mock-fraud-scoring` has no certificate).
 - Services are started by hand (`npm run services`); there is no supervisor.
+
+### Step 5 – transfer initiation (home PC, 2026-10-19)
+
+**Design.** `/send` (eligible customers only) → client form → one Server Action
+(`app/send/actions.js`): `assertSameOrigin` → `requireVerifiedCustomer()` →
+`reviewTransfer` (validate, issue idempotency key) or `initiateTransfer`
+(`lib/server/transfer-initiation.js`): eligibility again → key/amount/recipient format →
+source wallet must equal the server's → recipient lookup → stored-key replay → balance via
+Identity/CBI (fail closed) → eligibility, source wallet and recipient once more,
+synchronously → `transferWriter().create()` (`lib/server/transfer-orchestrator.js`, D47–D50).
+Money is integer cents (`lib/server/money.js`). Migration `transaction/0003` registers
+`transfer.requested`; nothing else in the schema changed.
+
+**State transitions** (unchanged trigger from migration 0001, mirrored in code):
+`pending_risk → pending_settlement | declined | expired`;
+`pending_settlement → settlement_in_flight | pending_risk | expired`;
+`settlement_in_flight → completed | failed`. Step 5 only inserts `pending_risk`.
+
+**End to end (real processes):** Alice reviews $12.50 to `bob@example.test`, confirms →
+"Transfer submitted – Pending – security check"; `/wallet` lists it with
+`Pending outgoing $28.00` (seeded test transfer included); resubmitting returns the same
+transfer; Carol, support and password-only sessions are refused; with the bank stopped the
+transfer is refused with "We cannot check your balance right now".
+
+**Remaining limitations**
+
+- Transfers stay `pending_risk`: no fraud worker consumes the outbox yet (Step 6), no
+  settlement (Step 7), and no job expires transfers after `pending_expires_at` – expired
+  but unmarked transfers keep holding funds (conservative).
+- The funds check is preliminary; Core Banking must enforce funds at posting.
+- A customer whose oldest wallet is not active cannot send (the balance flow uses the
+  oldest wallet; fails closed rather than using another wallet's balance).
+- Recipients are identified by email only (no merchant/QR payments, no recipient name at
+  confirmation); the history shows counterparties by wallet id.
+- The idempotency key protects retries of one confirmation; re-reviewing creates a new
+  intended transfer (by design).
+- The transfer writer is narrow by API and triggers, not database permissions (D3).
+- The confirmation step needs JavaScript for a normal browser flow (Flight data, as in Step 3).
+
+**Before Step 6:** an outbox worker that leases `fraud_check` messages (`lease_until`,
+`attempts`), calls Fraud & Risk Check over mTLS, stores the signed decision and moves
+`pending_risk → pending_settlement | declined` in one transaction; an expiry job; audit
+event types for those transitions (new migration).
+
+### Step 6 – fraud screening (home PC, 2026-10-19)
+
+**Design.** `services/fraud/` (Fraud & Risk, D54) signs decisions from the deterministic
+engine (`lib/fraud/engine.js`, D58) with `lib/fraud/risk-decision.js` (D56).
+`services/orchestrator/fraud-worker.js` (`npm run fraud-worker [-- --once]`, D55) runs
+`lib/orchestrator/fraud-worker.js`: claim (lease) → skip if not `pending_risk` → request
+with the DB row → verify → fenced apply (D57, D59). Migration `transaction/0004`
+registers `transfer.risk_approved`, `transfer.risk_declined`, `risk.decision_rejected`.
+
+**Transitions used:** `pending_risk → pending_settlement` (approve) and
+`pending_risk → declined` (decline); both already allowed by the 0001 trigger.
+
+**Demo (verified by `test:http`, real processes):** Alice sends $12.50 and $300.00 to Bob →
+both *Pending – security check*; `fraud-worker --once` prints `pending_settlement=2
+declined=1` (with the earlier $3.00 test transfer) → `/wallet` shows *Pending – awaiting
+settlement* and *Declined*; the pending outgoing total drops the declined amount.
+
+**Remaining limitations**
+
+- No settlement yet: approved transfers wait in `pending_settlement` with a pending
+  `settlement` outbox message; decisions expire after 10 minutes, so Step 7 must check
+  `expires_at` and re-screen (`pending_settlement → pending_risk`) when it is past.
+- No expiry job: transfers past `pending_expires_at` (and `dead` messages) stay pending and
+  keep holding funds until a later step expires them.
+- The engine sees only the transfer itself (no velocity, history or device signals);
+  the Step 2 mock-scoring vendor key and Fraud's service-token public key are unused.
+- The worker is started by hand; there is no supervisor or alerting for `dead` messages.
+- Lease length (30 s) is longer than one Fraud call (3 s deadline); a worker blocked longer
+  than that loses its lease and is fenced out (safe, but its work is repeated).
+- The narrow-writer guarantee is by API and triggers, not database permissions (D3).
+
+### Step 7 – settlement, bank posting and ledger (home PC, 2026-10-19)
+
+**Design.** `services/settlement/` (D61) ← `services/orchestrator/settlement-worker.js`
+(`npm run settlement-worker [-- --once]`) running `lib/orchestrator/settlement-worker.js`;
+Identity settlement tokens (D62); CBI `POST /v1/postings` (D63); bank postings (D64);
+outcomes (D65, D66); schema guards (D67). Full flow: docs/SERVICE_AUTH.md section 3c.
+
+**Transitions used:** `pending_settlement → settlement_in_flight → completed | failed`, and
+`pending_settlement → pending_risk` for an expired approval (all allowed by the 0001
+trigger; 0005 adds the evidence requirements for `completed` and `failed`).
+
+**End-to-end result (fresh temporary install, real processes):** Alice $500.00 → sends
+$12.50 → fraud `pending_settlement` → settlement `completed` → Alice **$487.50**, Bob
+**$262.50** at the bank and on `/wallet`; ledger debit/credit $12.50 each with the bank's
+posting reference. The browser flow in `test:http` settles $12.50 + $3.00 → Alice $484.50,
+Bob $265.50, *Completed*; the $300.00 transfer stays *Declined*.
+
+**Remaining limitations**
+
+- Unknown outcomes that outlive the approval are parked (`needs_reconciliation`) – there is
+  no reconciliation job or dashboard yet (Step 8).
+- No expiry job for `pending_risk`/`pending_settlement` transfers past `pending_expires_at`.
+- The CBI replay cache is in memory per process; the bank's idempotency key is what makes a
+  replayed settlement token harmless after a CBI restart.
+- Refusals are not stored at the bank; merchants can be credited by the code path but no UI
+  creates merchant payments.
+- A holder of Settlement's credentials plus an approval could post with its own key once
+  (the bank then holds a posting the Orchestrator does not know) – reconciliation must
+  detect it.
+- Workers and services are started by hand; no supervisor, alerting or metrics.
+- Narrow writers by API and triggers, not database permissions (D3).
+
+### Step 8 – operations, reconciliation and recovery (home PC, 2026-10-19)
+
+**Design.** `services/orchestrator/reconcile.js` (`npm run reconcile [-- --once [--requeue-dead]]`)
+runs `lib/orchestrator/reconciliation.js` (expire → requeue on request → reconcile →
+ledger check) with `recon.env` (D69); bank lookup via Identity + CBI (D70, D71);
+exceptions and integrity (D72); expiry and requeue (D73); `/operations` with
+`lib/server/operations.js` (D74). Migration `transaction/0006` registers the new audit event
+types; reconciliation decisions use the existing append-only `reconciliation_result` table.
+
+**End-to-end recovery (real processes, `test:reconcile`):** a bank that posts but answers too
+late leaves Alice's $12.50 *Processing*; `reconcile --once` finds the original posting →
+*Completed*, one ledger pair, Alice $487.50 / Bob $262.50, one posting. With CBI down the
+transfer stays unresolved and reserved; once CBI is back it completes. A request that never
+reached the bank was reconciled to *Failed* with nothing moved and the reservation released
+(**changed in Step 9, D76:** it now stays unresolved and reserved until the posting appears or
+an operator resolves it).
+Three concurrent `reconcile` processes resolve three transfers exactly once. An overdue
+transfer expires; a parked fraud check is retried only with `--requeue-dead`.
+
+**Security findings (this step)**
+
+- Next.js no longer lists the Reconciliation certificate (it was in `web.env` since Step 2,
+  unused) – moved to `recon.env`.
+- Next renders server pages twice per full load (also `/wallet`'s balance call): side
+  effects in page rendering must be idempotent; the operations view audit is de-duplicated.
+- No other issue found reviewing the lookup path, expiry and requeue against leases/fencing.
+
+**Remaining limitations**
+
+- Reconciliation does not re-verify *completed* transfers against bank postings (only open
+  outcomes); a posting made outside VaultPay with an unknown key (D61 limitation) is not found.
+- Mismatches and parked in-flight settlements need a human: there is no resolution workflow.
+- Recovery is a command on the server, not in the UI (by design); no scheduler, alerting or
+  metrics; the loop mode must be started by hand.
+- Expired transfers are detected only when `reconcile` runs.
+- The 2-minute minimum age assumes no worker blocks longer than its timeouts (12 s) without
+  losing its lease; a paused process holding a live lease is waited for, not overridden.
+- View de-duplication is in memory per Next.js process.
