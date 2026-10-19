@@ -49,9 +49,16 @@ data/
 *.sqlite3
 
 # VaultPay - secrets and private certificates
+# (npm run setup writes all of these under data/; these patterns also catch copies elsewhere)
 *.key
 *.p12
 *.pfx
+*.crt
+*.csr
+*.env
+*.staging-*
+.setup.lock
+setup-manifest.json
 
 # VaultPay - local logs and temporary files
 logs/

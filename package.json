@@ -2,6 +2,7 @@
   "name": "vaultpay",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "engines": {
     "node": ">=22.0.0 <23.0.0"
   },
@@ -10,7 +11,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "smoke": "node scripts/smoke-test.mjs"
+    "setup": "node scripts/setup.mjs",
+    "setup:check": "node scripts/setup-check.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
+    "test": "node --test \"tests/**/*.test.mjs\""
   },
   "dependencies": {
     "better-auth": "1.7.10",
