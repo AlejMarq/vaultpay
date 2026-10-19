@@ -14,6 +14,12 @@
     "setup": "node scripts/setup.mjs",
     "setup:check": "node scripts/setup-check.mjs",
     "smoke": "node scripts/smoke-test.mjs",
+    "mock-bank": "node services/mock-core-banking/server.js",
+    "test:mock-bank": "node scripts/mock-bank-check.mjs",
+    "identity": "node services/identity/server.js",
+    "cbi": "node services/cbi/server.js",
+    "services": "node scripts/start-services.mjs",
+    "test:services": "node scripts/services-check.mjs",
     "test": "node --test \"tests/**/*.test.mjs\"",
     "test:http": "node scripts/http-check.mjs"
   },

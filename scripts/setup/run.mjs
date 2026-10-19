@@ -17,8 +17,8 @@ import { protectDirectory } from './acl.mjs';
 import { hasFailures, runChecks } from './check.mjs';
 import { DATABASE_NAMES, ensureDatabases } from './databases.mjs';
 import { buildDirectoryAtomically, directoryState, ensurePlainDirectory, layout, lstatOrUndefined, SetupError } from './paths.mjs';
-import { generatePki, verifyPki } from './pki.mjs';
-import { generateSecrets, readSecret, verifySecrets } from './secrets.mjs';
+import { addMissingCertificates, generatePki, verifyPki } from './pki.mjs';
+import { generateSecrets, readSecret, upgradeSecretsLayout, verifySecrets } from './secrets.mjs';
 import { assertNotProduction, ensureDemoData } from './seed.mjs';
 
 export const RESETS = Object.freeze({
@@ -67,7 +67,9 @@ function archive(paths, items, stamp, report) {
 }
 
 // Ensures a generated directory is either complete-and-valid or absent-then-generated.
-async function ensureSet({ label, dir, generate, verify, renewHint, report }) {
+// `upgrade` (optional) brings a set written by older code up to date without replacing
+// anything (e.g. new certificate types); the result is verified like any other set.
+async function ensureSet({ label, dir, generate, verify, upgrade, renewHint, report }) {
   const { state } = directoryState(dir);
   if (state === 'empty') fs.rmdirSync(dir);
   if (state !== 'present') {
@@ -75,11 +77,13 @@ async function ensureSet({ label, dir, generate, verify, renewHint, report }) {
     report.created.push(label);
     return;
   }
+  const upgraded = upgrade ? await upgrade(dir) : null;
+  if (upgraded) report.created.push(`${label} upgraded (${upgraded})`);
   const { problems } = verify(dir);
   if (problems.length) {
-    throw new SetupError(`${label} exist but are incomplete or invalid: ${problems.join('; ')}. Nothing was changed. To replace them, run npm run setup -- ${renewHint}`);
+    throw new SetupError(`${label} exist but are incomplete or invalid: ${problems.join('; ')}. ${upgraded ? 'Only the upgrade above was applied' : 'Nothing was changed'}. To replace them, run npm run setup -- ${renewHint}`);
   }
-  report.verified.push(label);
+  if (!upgraded) report.verified.push(label);
 }
 
 function writeManifest(paths, { dataDir, now }) {
@@ -138,6 +142,8 @@ export async function runSetup({ dataDir, now = Date.now(), reset = {}, confirm 
       dir: paths.secrets,
       generate: (dir) => generateSecrets(dir, { now }),
       verify: verifySecrets,
+      upgrade: (dir) => (upgradeSecretsLayout(dir, { backupDir: path.join(paths.backups, stamp, 'secrets'), now })
+        ? 'service-token signing key moved from web.env to identity.env; old web.env backed up' : null),
       renewHint: RESETS.secrets.flag,
       report,
     });
@@ -146,6 +152,10 @@ export async function runSetup({ dataDir, now = Date.now(), reset = {}, confirm 
       dir: paths.pki,
       generate: (dir) => generatePki(dir, { now }),
       verify: (dir) => verifyPki(dir, { now }),
+      upgrade: async (dir) => {
+        const added = await addMissingCertificates(dir, { now });
+        return added.length ? `issued ${added.join(', ')} from the existing CA` : null;
+      },
       renewHint: RESETS.certs.flag,
       report,
     });

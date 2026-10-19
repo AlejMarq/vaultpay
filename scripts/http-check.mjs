@@ -21,6 +21,7 @@ import Database from 'better-sqlite3';
 
 import { totp } from '../tests/helpers/totp.mjs';
 
+import { startAllServices } from './lib/spawn-service.mjs';
 import { DEMO_CUSTOMERS, DEMO_OPS_USERS } from './setup/demo-data.mjs';
 import { runSetup } from './setup/run.mjs';
 
@@ -73,9 +74,13 @@ check('setup created a temporary installation', fs.existsSync(path.join(dataDir,
 const identity = new Database(path.join(dataDir, 'db', 'identity.db'), { readonly: true, fileMustExist: true });
 const sessionCount = () => identity.prepare('SELECT count(*) AS n FROM session').get().n;
 
+// Backend services as real processes (mock Core Banking → Identity → CBI), on free ports.
+const services = await startAllServices({ dataDir, root });
+check('mock Core Banking, Identity and CBI started as separate processes', Object.values(services.addresses).every((a) => a.address === '127.0.0.1'));
+
 const server = spawn(process.execPath, [path.join(root, 'node_modules', 'next', 'dist', 'bin', 'next'), ...startArgs, '--port', String(PORT)], {
   cwd: root,
-  env: { ...process.env, VAULTPAY_DATA_DIR: dataDir },
+  env: { ...process.env, VAULTPAY_DATA_DIR: dataDir, VAULTPAY_IDENTITY_PORT: String(services.ports.identity), VAULTPAY_CBI_PORT: String(services.ports.cbi) },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
 });
@@ -463,7 +468,10 @@ try {
   check('/wallet lists the customer\'s own transfers', walletHtml.includes('trf_a_to_b') && walletHtml.includes('trf_b_to_a'));
   const othersData = ['trf_c_to_b', 'trf_c_to_m', 'wal_demo_carol', 'Carol Demo'].filter((s) => walletHtml.includes(s));
   check('/wallet shows nothing from other customers', othersData.length === 0, othersData.join(', '));
-  check('/wallet shows no balance – only the CBI message', walletHtml.includes('Balance retrieval will be available after Core Banking Integration') && !walletHtml.includes('$500.00') && !walletHtml.includes('MCB-'));
+  check('/wallet shows Alice\'s own balance ($500.00) via Identity → CBI → mock Core Banking',
+    walletHtml.includes('data-balance="available"') && walletHtml.includes('$500.00'), walletHtml.match(/data-balance="\w+"/)?.[0]);
+  const internals = ['eyJ', 'MCB-', 'vaultpay-identity', 'vaultpay-cbi', 'corebanking', 'PRIVATE KEY', 'BEGIN CERTIFICATE', 'upstream_error'].filter((s) => walletHtml.includes(s));
+  check('the page carries no service token, account reference, key or internal error', internals.length === 0, internals.join(', '));
   await expectRedirect('a customer cannot open /support', await get('/support', aw.header()), '/access-denied', ['Look up customer', 'Customer support (read-only)']);
 
   console.log('\nRead-only support');
@@ -546,6 +554,8 @@ try {
   check('no transfer submission is exposed (only the sign-out form)', aliceSend.forms === 1 && !/name="(amount|payee|recipient)/.test(aliceSend.html), String(aliceSend.forms));
 
   const cw = await enrollViaHttp(carol);
+  const carolWallet = (await (await get('/wallet', cw.header())).text()).replaceAll('<!-- -->', '');
+  check('Carol sees only her own balance ($100.00), never Alice\'s', carolWallet.includes('$100.00') && !carolWallet.includes('$500.00') && !carolWallet.includes('wal_demo_alice'));
   const carolPending = await sendState(cw);
   check('Carol (KYC pending) is told transfers are unavailable until KYC is approved',
     carolPending.eligibility === 'ineligible' && JSON.stringify(carolPending.reasons) === '["kyc_pending"]' && carolPending.html.includes('pending'), JSON.stringify(carolPending.reasons));
@@ -559,6 +569,8 @@ try {
   writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'frozen' WHERE wallet_id = 'wal_demo_alice'").run());
   const frozen = await sendState(aw);
   check('a frozen wallet is refused', frozen.eligibility === 'ineligible' && JSON.stringify(frozen.reasons) === '["wallet_frozen"]', JSON.stringify(frozen.reasons));
+  const frozenWallet = (await (await get('/wallet', aw.header())).text()).replaceAll('<!-- -->', '');
+  check('a frozen wallet shows no balance', frozenWallet.includes('data-balance="unavailable"') && frozenWallet.includes('frozen or closed wallet') && !frozenWallet.includes('$500.00'));
   writeDb('identity', (db) => db.prepare("UPDATE wallet SET status = 'active' WHERE wallet_id = 'wal_demo_alice'").run());
   check('unfreezing applies on the next request (nothing cached)', (await sendState(aw)).eligibility === 'eligible');
 
@@ -610,6 +622,29 @@ try {
   check('a valid session cookie under a foreign Host resolves to no session (nothing rendered)',
     rebWalletTarget === '/login' && !rebWallet.text.includes('wal_demo_alice'), `${rebWallet.status} ${rebWalletTarget}`);
 
+  // -------------------------------------------------------------------------
+  // Balance with a dependency down: a safe message, nothing internal.
+  console.log('\nBalance when a service is down (4B)');
+  const balanceState = async () => {
+    const html = (await (await get('/wallet', aw.header())).text()).replaceAll('<!-- -->', '');
+    return { state: html.match(/data-balance="(\w+)"/)?.[1], html };
+  };
+  check('baseline: balance available', (await balanceState()).state === 'available');
+  const bobBrowser = await enrollViaHttp(bob);
+  const bobWallet = (await (await get('/wallet', bobBrowser.header())).text()).replaceAll('<!-- -->', '');
+  // (Bob's history legitimately names Alice's wallet as the sender of trf_a_to_b; her balance must not appear.)
+  check('Bob sees only his own balance ($250.00), never Alice\'s', bobWallet.includes('data-balance="available"') && bobWallet.includes('$250.00') && !bobWallet.includes('$500.00'),
+    `balance=${bobWallet.match(/data-balance="(\w+)"/)?.[1]} redirect=${bobWallet.match(/NEXT_REDIRECT;\w+;([^;]+);/)?.[1]} amounts=${(bobWallet.match(/\$\d+\.\d\d/g) ?? []).join(',')}`);
+  await services.bank.stop();
+  const bankDown = await balanceState();
+  check('mock Core Banking down → "temporarily unavailable"', bankDown.state === 'unavailable' && bankDown.html.includes('temporarily unavailable'));
+  await services.cbi.stop();
+  const cbiDown = await balanceState();
+  check('CBI down → "temporarily unavailable"', cbiDown.state === 'unavailable' && cbiDown.html.includes('temporarily unavailable'));
+  const downLeaks = ['ECONNREFUSED', 'cbi_503', 'unavailable:', 'upstream', 'MCB-', 'eyJ', '    at ', 'Error:'].filter((s) => `${bankDown.html}${cbiDown.html}`.includes(s));
+  check('outage pages reveal nothing internal', downLeaks.length === 0, downLeaks.join(', '));
+  check('the wallet page still works without a balance', cbiDown.html.includes('wal_demo_alice') && cbiDown.html.includes('Recent transfers'));
+
   // Last, because it locks Carol's sign-in for 15 minutes in this server process.
   console.log('\nRate limiting');
   for (let i = 0; i < 5; i += 1) await loginAs(carol, `wrong-${i}`);
@@ -625,6 +660,7 @@ try {
   identity.close();
   server.kill();
   await exited;
+  await Promise.all([services.cbi.stop(), services.identity.stop(), services.bank.stop()]);
   fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }
 

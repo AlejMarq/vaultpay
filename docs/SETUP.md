@@ -66,9 +66,9 @@ data/
 │   └── mock-core-banking.db    Mock Core Banking (account balances, postings)
 ├── pki/
 │   ├── ca.crt, ca.key          Development CA (2 years) – ca.key is used only by setup
-│   └── <service>.crt/.key      cbi, settlement, recon, mock-core-banking (1 year)
+│   └── <service>.crt/.key      cbi, settlement, recon, mock-core-banking, identity, web (1 year)
 ├── secrets/
-│   └── <process>.env           web, fraud, settlement, cbi, mock-core-banking, mock-fraud-scoring
+│   └── <process>.env           web, identity, fraud, settlement, cbi, mock-core-banking, mock-fraud-scoring
 ├── backups/                    Copies made before migrations, and items moved by reset options
 └── setup-manifest.json         Key IDs, certificate fingerprints/expiry, install IDs – no secrets
 ```
@@ -97,7 +97,8 @@ migrations. Migration files are checksummed – an edited migration stops setup.
 
 | File | Holds |
 |------|-------|
-| `web.env` | Better Auth secret, service-token **signing** key (Identity), Reconciliation client certificate |
+| `web.env` | Better Auth secret, Next.js client certificate (`vaultpay-web`), Reconciliation client certificate – **no signing key** |
+| `identity.env` | Service-token **signing** key (only here), Identity server certificate |
 | `fraud.env` | Risk-decision **signing** key, service-token public key, mock fraud-scoring API key |
 | `settlement.env` | Risk-decision **public** key, service-token public key, Settlement client certificate |
 | `cbi.env` | Service-token public key, mock Core Banking credential, CBI certificate |
@@ -125,8 +126,8 @@ Reconciliation (inside Next.js) → CBI with a read-only scope, and CBI → mock
 
 - Carol has funds but a **pending** KYC status, so she shows that unverified customers
   cannot send money. Demo Coffee starts at $0.00 and only receives payments.
-- Balances live in the mock Core Banking database, the source of truth (D7). The app does
-  not read them yet – that needs Core Banking Integration (Step 4).
+- Balances live in the mock Core Banking database, the source of truth (D7). `/wallet`
+  shows them through Identity and CBI when the backend services run (section 8).
 - Seeded accounts have **no two-factor yet**: each one enrols TOTP on its first sign-in on
   each computer (section 5).
 - Passwords are stored only as Better Auth hashes; seeding creates no sessions.
@@ -134,7 +135,7 @@ Reconciliation (inside Next.js) → CBI with a read-only scope, and CBI → mock
 
 Because the passwords are public, whoever signs in to a demo account first on a computer
 enrols its TOTP. If you lose the authenticator entry and the backup codes, reset the demo
-data with `npm.cmd run setup -- --reset-db` (section 8).
+data with `npm.cmd run setup -- --reset-db` (section 9).
 
 ## 5. Signing in, two-factor and sessions
 
@@ -168,7 +169,7 @@ not enough.
 |------|-----|------|
 | `/login` | anyone | Email + password |
 | `/mfa`, `/mfa/setup`, `/mfa/verify` | signed-in / signing-in users | Two-factor status, enrollment, sign-in challenge |
-| `/wallet` | active customers (MFA) | Name, email, KYC status, wallet ID and status, recent transfers (read-only). The balance shows *"Balance retrieval will be available after Core Banking Integration (CBI) is connected."* |
+| `/wallet` | active customers (MFA) | Name, email, KYC status, wallet ID and status, **balance** (via Identity and CBI, section 8), recent transfers (read-only) |
 | `/send` | active customers (MFA) | Whether you may send money right now, and why not. No transfer form yet (Step 5). |
 | `/support` | active `support_readonly` users (MFA) | Look up a customer by email: masked email and phone, customer and KYC status, wallet, transfer history. Read-only; every search and view is audited. |
 | `/access-denied` | – | Shown for the wrong role, a suspended/closed customer, a disabled ops user, or an account with no VaultPay role |
@@ -216,13 +217,55 @@ record cannot be written, nothing is shown. Support's database connections are r
 | TOTP replay protection | Each TOTP code is claimed (hashed, per user) before Better Auth checks it, so one code completes at most one verification – also across concurrent attempts. Claims last 2 minutes. |
 | MFA marker | `session.mfaVerifiedAt` is set only by Better Auth when it creates a session by completing a second factor; it cannot be set by a client, copied to another session, or extended |
 | Headers | `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, restrictive `Permissions-Policy`, COOP/CORP `same-origin`; no `X-Powered-By` |
+| Service boundaries | Mock bank, Identity and CBI are separate processes on `127.0.0.1` with mutual TLS and exact caller allowlists; only Identity holds the token signing key, only CBI the bank credential; balance tokens are single-use, 30-second, certificate-bound (`docs/SERVICE_AUTH.md`) |
 | Build hygiene | `next build` never opens `data/`, and no database, key or secret is traced into build output (checked by `npm run test:http`) |
 
 Limits: plain HTTP on localhost (cookies are not `Secure`); multi-step pages need
 JavaScript; integrity checks and permissions stop mistakes and other local accounts, not
 an administrator or malware running as you.
 
-## 8. Running setup again, and replacing items
+## 8. Backend services and balances (Step 4)
+
+Customer balances come from three backend services, each its own Node.js process on
+`127.0.0.1`, talking to each other only over mutual TLS:
+
+| Service | Start alone | Port (variable) | Role |
+|---------|-------------|-----------------|------|
+| mock Core Banking | `npm.cmd run mock-bank` | 4100 (`VAULTPAY_MOCK_BANK_PORT`) | Stands in for the bank; holds the balances; accepts only CBI |
+| Identity | `npm.cmd run identity` | 4200 (`VAULTPAY_IDENTITY_PORT`) | The **only** holder of the service-token signing key; issues a 30-second, single-use balance token for a signed-in, MFA-verified customer |
+| CBI | `npm.cmd run cbi` | 4300 (`VAULTPAY_CBI_PORT`) | The only component that talks to Core Banking; returns the balance for the account named in a valid token |
+
+**To see balances on `/wallet`:**
+
+```powershell
+npm.cmd run services     # terminal 1: mock bank, Identity, CBI (Ctrl+C stops all three)
+npm.cmd run dev          # terminal 2: the app
+```
+
+Without the services the app still works; `/wallet` says *"Your balance is temporarily
+unavailable"*. A frozen or closed wallet shows no balance. Each customer only ever sees their
+own balance – the bank account is decided by Identity from its own records, never by the
+browser or by Next.js.
+
+**Checks:**
+
+```powershell
+npm.cmd run test:mock-bank   # the bank as a real process
+npm.cmd run test:services    # all three as real processes: binding, mTLS allowlists, no secrets
+npm.cmd run test:http        # the built app end to end, with all three services
+```
+
+All three refuse to start without `npm run setup` (`CONFIG_MISSING`) and on Node.js other
+than 22. Which process holds which certificate, key and database connection, the token
+format and the request/response formats are in **[docs/SERVICE_AUTH.md](SERVICE_AUTH.md)**.
+
+**Upgrading an older installation:** before Step 4B, `web.env` held the service-token
+signing key. `npm.cmd run setup` now moves that key **unchanged** into the new
+`identity.env` (old `web.env` backed up), and issues the new `identity` and `web`
+certificates from the existing CA. Sessions, TOTP enrollments and all data are kept. Until
+then the app fails closed – no page is served and `/api/health` reports `unavailable`
+(server log: `web.env must not contain SERVICE_TOKEN_SIGNING_KEY`).
+## 9. Running setup again, and replacing items
 
 Re-running is safe and is the normal way to update an installation:
 
@@ -245,7 +288,7 @@ Options can be combined. Without an interactive terminal the confirmation fails 
 nothing is changed. Old items are moved, never deleted. Stop any running VaultPay
 processes first.
 
-## 9. `npm run setup:check`
+## 10. `npm run setup:check`
 
 Read-only; exit code 1 if any line is `FAIL`. It checks:
 
@@ -261,7 +304,7 @@ Read-only; exit code 1 if any line is `FAIL`. It checks:
 | demo data | every demo login, customer, KYC record, wallet, ops user and merchant is present and linked |
 | git | generated files are git-ignored and none are tracked |
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Message | Meaning / fix |
 |---------|---------------|
@@ -281,6 +324,10 @@ Read-only; exit code 1 if any line is `FAIL`. It checks:
 | `could not move … (EBUSY)` | Stop `npm run dev` / `npm start` and other VaultPay processes, then retry. |
 | `WARN permissions …` | `icacls` could not restrict `data/`; check the folder's Security tab. Setup still completes. |
 | `refusing to run: NODE_ENV=production` | Unset `NODE_ENV` – VaultPay is a localhost demo. |
+| `mock Core Banking` / `Identity service` / `CBI cannot start: CONFIG_MISSING` | Run `npm.cmd run setup` first (it also upgrades older installations). |
+| `web.env must not contain SERVICE_TOKEN_SIGNING_KEY` | An installation from before Step 4B – run `npm.cmd run setup` (moves the key to `identity.env`, keeps everything else). |
+| `Your balance is temporarily unavailable` | Start the services: `npm.cmd run services`. The server log line `[balance] unavailable: …` says which step failed. |
+| `EADDRINUSE` on port 4100 (mock bank) | Another mock bank is running; stop it or set `VAULTPAY_MOCK_BANK_PORT`. |
 | `EADDRINUSE` on port 3000 | Another server is running; stop it or use `npm.cmd run dev -- --port 3001` (then open that port on `localhost`). |
 
 Empty `*.db-wal` / `*.db-shm` files next to the databases are normal SQLite working files.

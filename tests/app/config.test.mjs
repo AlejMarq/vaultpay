@@ -60,8 +60,19 @@ test('invalid values are refused without revealing them', async (t) => {
   replace(dataDir, 'BETTER_AUTH_SECRET', 'short-secret');
   assertConfigError(() => loadWebConfig({ dataDir }), 'CONFIG_INVALID', { notContaining: ['short-secret'] });
 
-  writeEnv(dataDir, 'web', original.replace(/^SERVICE_TOKEN_SIGNING_KEY=.*\n/m, ''));
+  writeEnv(dataDir, 'web', original.replace(/^TLS_CERT=.*\n/m, ''));
   assertConfigError(() => loadWebConfig({ dataDir }), 'CONFIG_INVALID', { notContaining: [secret] });
+});
+
+test('Next.js refuses a web.env holding another process\'s secret (e.g. the service-token signing key)', async (t) => {
+  const { dataDir } = await freshInstall(t);
+  const original = readEnv(dataDir, 'web');
+  assert.doesNotMatch(original, /SERVICE_TOKEN_SIGNING_KEY/, 'the signing key is not in web.env');
+  const identityKey = util.parseEnv(readEnv(dataDir, 'identity')).SERVICE_TOKEN_SIGNING_KEY;
+  for (const extra of [`SERVICE_TOKEN_SIGNING_KEY=${identityKey}`, 'MOCK_CORE_BANKING_API_KEY=x', 'RISK_DECISION_SIGNING_KEY=x']) {
+    writeEnv(dataDir, 'web', `${original}${extra}\n`);
+    assertConfigError(() => loadWebConfig({ dataDir }), 'CONFIG_UNSAFE', { notContaining: [identityKey] });
+  }
 });
 
 test('a junction in place of data/secrets is refused', async (t) => {

@@ -53,6 +53,16 @@ Assignment 5" and "Known limitations" sections are built from it.
 | D37 | 2026-10-19 | Balances in the UI | – | **My requirement** – no direct mock Core Banking reads from Next.js | `/wallet` shows a "available after CBI" message; a test fails if app code opens the mock bank DB. |
 | D38 | 2026-10-18 | Build hygiene | – | (AI finding, accepted) | Runtime `data/` paths marked `turbopackIgnore` so build traces never list databases/keys/secrets (regression check in `test:http`); the DB/Better Auth getters refuse to run during `next build`. |
 
+| D39 | 2026-10-19 | Mock Core Banking service (Step 4A) | Separate Node.js HTTPS process on 127.0.0.1, read-only balance endpoint, reusing the Step 2 certificates and env files | **My requirement** – no `rejectUnauthorized: false`, generic errors, no DB exposure to Next.js | `services/mock-core-banking/`; owns the only connection to `mock-core-banking.db` (read-only); `npm run mock-bank`, `npm run test:mock-bank`. |
+| D40 | 2026-10-19 | Who may call Core Banking | Any client certificate from the dev CA | **Changed (AI)** – CA trust alone would let Settlement or Reconciliation reach the bank | The bank also requires `CN=vaultpay-cbi` and the Core Banking credential from `cbi.env` (constant-time compare), checked before the request is parsed. |
+| D41 | 2026-10-19 | CBI → bank client | Narrow client: one read-only call, mTLS with CBI's certificate, server identity pinned to `CN=vaultpay-mock-core-banking`, 3 s hard deadline, 16 KB limit, strict zod schema | **My requirement** – explicit timeouts | `lib/cbi/core-banking-client.js`; for the CBI process only (a test fails if `app/` or `lib/server/` import it). |
+| D42 | 2026-10-19 | Service tokens (design for 4B) | Identity-issued EdDSA JWS, `typ vaultpay-service+jwt`, `kid`, `iss vaultpay-identity`, single `aud`, `sub` = mTLS CN, `cnf.x5t#S256` certificate binding, ≤ 60 s, single-use `jti`, one scope + request binding | **My requirement** – design only, not a broad framework | `docs/SERVICE_AUTH.md`; to be implemented on the links into CBI in Step 4B. |
+
+| D43 | 2026-10-19 | Who holds the service-token signing key | Identity inside the Next.js process (`web.env`, D42 design) | **Changed – my security correction**: Next.js must not hold or use it | New **Identity service process** (`services/identity/`, `identity.env`) is the only holder; Next.js refuses to start if `web.env` contains it (or any other process's secret). |
+| D44 | 2026-10-19 | How Next.js gets a balance token | Next.js requests a token for an account | **Changed (AI, within my requirement: no generic endpoint, no caller-chosen account)** | One purpose-specific endpoint: Next.js presents the **customer's own session token** over mTLS; Identity validates session, MFA marker, active customer and active wallet in its read-only DB and takes the account from the wallet record. Fixed `aud`/`sub`/`scope`; 30 s; `cnf` binding; single-use `jti`. |
+| D45 | 2026-10-19 | Next.js's service identity | Reuse the Reconciliation certificate | **Changed (AI)** | Separate client certificate `vaultpay-web` for Identity and CBI calls; `vaultpay-recon` stays for reconciliation. Identity gets a server certificate `vaultpay-identity`. |
+| D46 | 2026-10-19 | Upgrading existing installations | `--rotate-secrets` / `--renew-certs` | **Changed (AI)** – rotation would break TOTP enrollments | `npm run setup` moves the signing key unchanged from `web.env` to `identity.env` (backup kept) and issues only the *new* certificates from the existing CA; a half-present certificate is still refused. Verified on the home PC (same key id, same Better Auth secret). |
+
 ### D1 notes – why each process exists
 - **Next.js app** – required stack; hosts UI, API routes, Identity, Orchestrator & Ledger (+ background loop), Ops Support, Reconciliation & Audit.
 - **Fraud & Risk Check** – real outage for 272; sole holder of the signing key for 82; hostile scoring responses for 274.
@@ -168,6 +178,7 @@ Server Action form POSTs.
 | 0 – Environment & scaffold | Environment verified; repo created and pushed; Next.js 16.4.1 starter runs; lint passes | Configured 2026-10-18: Node 22.23.3 / npm 10.9.9; repo cloned at `C:\dev\vaultpay`; `npm ci` succeeded; `npm run lint` passes; `npm run dev` starts and the starter page loads; git status clean. Phase 0 dependencies installed; `npm run smoke` 33/33 pass; `npm run lint` passes; `npm run build` succeeds; `/api/health` returns `{"status":"ok"}` under `npm run start` (see below) | Both computers configured; Node 22 pinned (D13). Remaining: on the work laptop, `npm ci`, `npm run smoke`, `npm run build` and the `/api/health` check |
 | 2 – Setup, databases, PKI, secrets, demo data | Pending (needs Phase 0 laptop steps, then `npm ci` + `npm run setup`) | Done 2026-10-18 (Sections A–C): `npm test` 123 tests – 122 pass, 0 fail, 1 skipped (file symlinks need Developer Mode); `npm run setup` on the existing install added only the mock Core Banking DB and demo data (keys and certificates kept); repeat run kept everything; `npm run setup:check` 11/11 PASS; `NODE_ENV=production` refused; lint, build, smoke test pass | Not yet: login/TOTP UI, transfer endpoints, Fraud/Settlement/CBI services (later steps). `/api/health` still uses an in-memory DB |
 | 3 – Authentication, MFA, roles, KYC | Pending (`git pull`, `npm ci`, `npm run setup` migrates to identity v3 / transaction v2) | Done 2026-10-19 (Sections 3A–3F): `npm test` 218 tests – 217 pass, 0 fail, 1 skipped; `npm run test:http` 134/134; lint, build, smoke, setup, `setup:check` 11/11 PASS; production audit 0 vulnerabilities | Next: Step 4 (Core Banking Integration, balances) and Step 5 (transfers, which must call `requireVerifiedCustomer()` again just before creating a transfer) |
+| 4 – Core Banking integration and balances | Pending (`git pull`, `npm ci`, `npm run setup` – upgrades the secrets layout and issues the new certificates) | Done 2026-10-19 (4A–4C): `npm test` 254 – 253 pass, 0 fail, 1 skipped; `test:http` 144/144 (twice); `test:services` 28/28; `test:mock-bank` 10/10; lint, build, smoke, setup, `setup:check` pass; home PC upgraded in place | Next: Step 5 (transfers) – see "Before Step 5" below |
 
 ### Phase 0 dependency verification – home PC, 2026-10-18
 
@@ -237,3 +248,41 @@ Final Section C results are recorded in the Phase status row and in the Problems
 - Step 4: Core Banking Integration over mTLS (balances on `/wallet`).
 - Step 5: transfers – call `requireVerifiedCustomer()` immediately before creating each
   transfer, take the source wallet explicitly, add the transfer audit event types.
+
+### Step 4 – Core Banking integration and balances (home PC, 2026-10-19)
+
+| Section | Delivered | Verified |
+|---|---|---|
+| 4A | Mock Core Banking HTTPS process (mTLS, CN allowlist `vaultpay-cbi` + credential, read-only balance endpoint); narrow CBI → bank client (server CN pinned, 3 s deadline, strict schema) | 17 integration tests; `test:mock-bank` 10/10 against the real process and the home PC install |
+| 4B | Identity process (only holder of the signing key; one purpose-specific endpoint), CBI process, service tokens (EdDSA, `typ`, `kid`, fixed `aud`/`sub`/`scope`, `cnf` certificate binding, 30 s, single-use `jti`), balances on `/wallet`; secrets-layout upgrade path | 12 balance-flow tests, 2 upgrade tests; `test:services` 28/28; home PC upgraded with the same key id and Better Auth secret |
+| 4C | Review of the full flow against `docs/SERVICE_AUTH.md`; regression test for oversized request bodies; doc wording fixed ("fails closed", not "refuses to start"); end-to-end scenario extended to Bob | 254 unit tests (253 pass, 1 skip); `test:http` 144/144 twice |
+
+**End-to-end scenario (real processes: Next.js, Identity, CBI, mock Core Banking):** Alice
+signs in and completes TOTP → `/wallet` shows **$500.00**; Bob sees **$250.00** and Carol
+**$100.00**, never Alice's; support is refused `/wallet` (and Identity refuses support and
+password-only sessions); a frozen wallet shows no balance; stopping mock Core Banking, then
+CBI, shows "Your balance is temporarily unavailable" with nothing internal on the page.
+
+**4C review result:** no code defects found. Checked: oversized/garbled bodies at Identity
+(connection cut, service keeps serving – now a regression test); token single use is
+recorded before the bank call; Identity re-checks session expiry, MFA marker, customer and
+wallet status itself; Next.js additionally rejects a balance for a different wallet;
+every outage maps to the generic message; Next.js loads only `web.env` and fails closed if it
+holds another process's secret.
+
+**Before Step 5 (transfers)**
+
+- **New token purpose:** `corebanking.settlement:submit` needs its own Identity endpoint
+  (bound to transfer id, amount, currency and idempotency key) and its own CBI scope for
+  `sub vaultpay-settlement`; Settlement needs a server certificate if Next.js/Orchestrator
+  calls it over mTLS (only a client certificate exists today).
+- **Mock bank writes:** postings need a writable bank connection and an idempotent posting
+  endpoint (the `posting` table and unique idempotency key exist since Step 2).
+- **Replay state is in memory** per CBI process; a settlement token must additionally be
+  idempotent at the bank, since a CBI restart forgets used `jti`s within the 30 s window.
+- **Source wallet:** the DAL shows the oldest wallet, eligibility prefers an active one –
+  transfers must take the source wallet explicitly and re-check ownership and status.
+- **Audit event types** for transfers must be registered by a new transaction migration.
+- **Fraud & Risk Check / Settlement processes** do not exist yet; their certificates and
+  keys from Step 2 are unused so far (`mock-fraud-scoring` has no certificate).
+- Services are started by hand (`npm run services`); there is no supervisor.

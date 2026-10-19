@@ -14,7 +14,7 @@ const env = (dataDir, proc) => util.parseEnv(readEnv(dataDir, proc));
 test('each process receives only its own keys', async (t) => {
   const { dataDir } = await freshInstall(t);
   const holders = (key) => PROCESSES.filter((p) => key in env(dataDir, p));
-  assert.deepEqual(holders('SERVICE_TOKEN_SIGNING_KEY'), ['web']);
+  assert.deepEqual(holders('SERVICE_TOKEN_SIGNING_KEY'), ['identity']);
   assert.deepEqual(holders('RISK_DECISION_SIGNING_KEY'), ['fraud']);
   assert.deepEqual(holders('RISK_DECISION_PUBLIC_KEY'), ['settlement']);
   assert.deepEqual(holders('BETTER_AUTH_SECRET'), ['web']);
@@ -39,15 +39,15 @@ test('Node\'s built-in loader reads every env file', async (t) => {
 
 test('jose: service tokens signed by Identity verify at CBI; risk decisions signed by Fraud verify at Settlement', async (t) => {
   const { dataDir } = await freshInstall(t);
-  const web = env(dataDir, 'web');
+  const identity = env(dataDir, 'identity');
   const cbi = env(dataDir, 'cbi');
   const fraud = env(dataDir, 'fraud');
   const settlement = env(dataDir, 'settlement');
 
   const token = await new SignJWT({ scope: 'settlement:submit', transfer_id: 'trf_1' })
-    .setProtectedHeader({ alg: 'EdDSA', kid: web.SERVICE_TOKEN_KEY_ID })
+    .setProtectedHeader({ alg: 'EdDSA', kid: identity.SERVICE_TOKEN_KEY_ID })
     .setIssuer('vaultpay-identity').setAudience('vaultpay-cbi').setIssuedAt().setExpirationTime('60s')
-    .sign(loadPrivateKey(web.SERVICE_TOKEN_SIGNING_KEY));
+    .sign(loadPrivateKey(identity.SERVICE_TOKEN_SIGNING_KEY));
   const { payload, protectedHeader } = await jwtVerify(token, loadPublicKey(cbi.SERVICE_TOKEN_PUBLIC_KEY), {
     algorithms: ['EdDSA'], issuer: 'vaultpay-identity', audience: 'vaultpay-cbi',
   });
@@ -87,5 +87,5 @@ test('verifySecrets rejects weak, mismatched or escaping values', async (t) => {
   const rest = verifySecrets(dir).problems.join('\n');
   assert.match(rest, /BETTER_AUTH_SECRET must be at least 32 random bytes/);
   assert.match(rest, /MOCK_CORE_BANKING_API_KEY differs between cbi\.env and mock-core-banking\.env/);
-  assert.match(rest, /fraud\.env: SERVICE_TOKEN_KEY_ID does not match web's service token key/);
+  assert.match(rest, /fraud\.env: SERVICE_TOKEN_KEY_ID does not match identity's service token key/);
 });

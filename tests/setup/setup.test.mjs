@@ -38,9 +38,9 @@ test('fresh setup creates every database, secret and certificate, and passes all
   const files = Object.keys(snapshot(dataDir)).map((f) => f.replaceAll('\\', '/')).sort();
   assert.deepEqual(files, [
     'db/identity.db', 'db/mock-core-banking.db', 'db/transaction.db',
-    'pki/ca.crt', 'pki/ca.key', 'pki/cbi.crt', 'pki/cbi.key', 'pki/mock-core-banking.crt', 'pki/mock-core-banking.key',
-    'pki/recon.crt', 'pki/recon.key', 'pki/settlement.crt', 'pki/settlement.key',
-    'secrets/cbi.env', 'secrets/fraud.env', 'secrets/mock-core-banking.env', 'secrets/mock-fraud-scoring.env',
+    'pki/ca.crt', 'pki/ca.key', 'pki/cbi.crt', 'pki/cbi.key', 'pki/identity.crt', 'pki/identity.key', 'pki/mock-core-banking.crt', 'pki/mock-core-banking.key',
+    'pki/recon.crt', 'pki/recon.key', 'pki/settlement.crt', 'pki/settlement.key', 'pki/web.crt', 'pki/web.key',
+    'secrets/cbi.env', 'secrets/fraud.env', 'secrets/identity.env', 'secrets/mock-core-banking.env', 'secrets/mock-fraud-scoring.env',
     'secrets/settlement.env', 'secrets/web.env',
     'setup-manifest.json',
   ]);

@@ -29,6 +29,9 @@ export const CERTIFICATES = Object.freeze([
   { name: 'settlement', cn: 'vaultpay-settlement', serverAuth: false, clientAuth: true },
   { name: 'recon', cn: 'vaultpay-recon', serverAuth: false, clientAuth: true },      // read-only records scope at CBI
   { name: 'mock-core-banking', cn: 'vaultpay-mock-core-banking', serverAuth: true, clientAuth: false },
+  // Step 4B
+  { name: 'identity', cn: 'vaultpay-identity', serverAuth: true, clientAuth: false },  // Identity service (issues service tokens)
+  { name: 'web', cn: 'vaultpay-web', serverAuth: false, clientAuth: true },           // Next.js as a client of Identity and CBI
 ]);
 
 export const PKI_FILES = Object.freeze(
@@ -51,25 +54,42 @@ export async function generatePki(dir, { now = Date.now() } = {}) {
   });
   writeNewFile(path.join(dir, 'ca.crt'), ca.cert);
   writeNewFile(path.join(dir, 'ca.key'), ca.private);
+  for (const c of CERTIFICATES) await issueLeaf(dir, { key: ca.private, cert: ca.cert }, c, now);
+}
 
-  // A service certificate never outlives the CA that signed it.
-  const leafNotAfter = new Date(Math.min(now + LEAF_DAYS * DAY_MS, caNotAfter.getTime()));
-  for (const c of CERTIFICATES) {
-    const leaf = await selfsigned.generate([{ name: 'commonName', value: c.cn }], {
-      ...BASE,
-      notBeforeDate,
-      notAfterDate: leafNotAfter,
-      ca: { key: ca.private, cert: ca.cert },
-      extensions: [
-        { name: 'basicConstraints', cA: false, critical: true },
-        { name: 'keyUsage', digitalSignature: true, critical: true },
-        { name: 'extKeyUsage', serverAuth: c.serverAuth, clientAuth: c.clientAuth },
-        { name: 'subjectAltName', altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }] },
-      ],
-    });
-    writeNewFile(path.join(dir, `${c.name}.crt`), leaf.cert);
-    writeNewFile(path.join(dir, `${c.name}.key`), leaf.private);
-  }
+// Issues one service certificate signed by the CA. It never outlives the CA.
+async function issueLeaf(dir, ca, c, now) {
+  const caNotAfter = new Date(new crypto.X509Certificate(ca.cert).validTo).getTime();
+  const leaf = await selfsigned.generate([{ name: 'commonName', value: c.cn }], {
+    ...BASE,
+    notBeforeDate: new Date(now),
+    notAfterDate: new Date(Math.min(now + LEAF_DAYS * DAY_MS, caNotAfter)),
+    ca,
+    extensions: [
+      { name: 'basicConstraints', cA: false, critical: true },
+      { name: 'keyUsage', digitalSignature: true, critical: true },
+      { name: 'extKeyUsage', serverAuth: c.serverAuth, clientAuth: c.clientAuth },
+      { name: 'subjectAltName', altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }] },
+    ],
+  });
+  writeNewFile(path.join(dir, `${c.name}.crt`), leaf.cert);
+  writeNewFile(path.join(dir, `${c.name}.key`), leaf.private);
+}
+
+/**
+ * Upgrade for an existing installation: issues certificates that newer code introduced
+ * (both files absent), signed by the existing CA. Nothing existing is touched, and only
+ * a sound CA is used – everything is verified again afterwards. Returns the names added.
+ */
+export async function addMissingCertificates(dir, { now = Date.now() } = {}) {
+  const present = new Set(fs.readdirSync(dir));
+  const missing = CERTIFICATES.filter((c) => !present.has(`${c.name}.crt`) && !present.has(`${c.name}.key`));
+  if (missing.length === 0 || !present.has('ca.crt') || !present.has('ca.key')) return [];
+  const ca = { cert: fs.readFileSync(path.join(dir, 'ca.crt'), 'utf8'), key: fs.readFileSync(path.join(dir, 'ca.key'), 'utf8') };
+  const x509 = new crypto.X509Certificate(ca.cert);
+  if (!x509.ca || !x509.checkPrivateKey(crypto.createPrivateKey(ca.key)) || new Date(x509.validTo).getTime() <= now) return [];
+  for (const c of missing) await issueLeaf(dir, ca, c, now);
+  return missing.map((c) => c.name);
 }
 
 function read(dir, file, problems) {
