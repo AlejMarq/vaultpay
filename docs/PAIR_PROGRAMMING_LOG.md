@@ -179,6 +179,8 @@ Assignment 5" and "Known limitations" sections are built from it.
 | 2026-10-19 | Step 8: one full page load of `/operations` wrote two `support.operations_view` rows – Next 16 (Cache Components) renders the page twice for one request; the same happens to `/wallet`'s balance call (two log lines per load, seen since Step 4). React `cache()` did not span the two passes | Views recorded once per session within 2 s (in-memory de-duplication only; the record is still written before the first data, and an audit failure still stops the page). HTTP check: one row per load, a new row on a later reload |
 | 2026-10-19 | Step 8: first versions of three reconciliation tests had setup mistakes (a "too recent" check that the real bank delay had already outlived; an expiry scenario whose helper approved every pending transfer; an assertion on a transfer id the overview deliberately does not list) | Test setup corrected; no product change |
 | 2026-10-19 | **Step 9 review – correctness defect:** reconciliation marked a transfer `failed` when the bank had no posting for its key and no worker had touched it for 2 minutes. That is not authoritative: a request already delivered to the bank can commit later (lock wait, pause), leaving a failed transfer debited with no ledger entry. The same race existed for a bank refusal received on a retry | D76, D77: absence never fails a transfer; a refusal fails only a first-and-only send. Two regression tests (late posting after a "not found" lookup; refusal after an unanswered send) and the real-process check updated |
+| 2026-10-19 | Step 9 packaging check: `npm ci` in a fresh copy of the submission ZIP stopped at `better-sqlite3` (`gyp ERR! … Could not find any Visual Studio installation`) – npm ran `node-gyp rebuild` although the package declares `"gypfile": false` and ships `prebuilds/win32-x64.node`; this PC has no C++ build tools. The working install in `C:\dev\vaultpay` was never compiled | Documented `npm.cmd ci --ignore-scripts` (no dependency needs an install script on Windows); verified on the fresh copy: lint, `npm test`, setup, `setup:check`, build, `test:http`, `test:settlement`, `test:reconcile` pass. No dependency changed |
+| 2026-10-19 | Step 9 packaging check: the test "generated paths are git-ignored" failed in the ZIP copy (no `.git`; `git archive` excludes it by design) | Test skips outside a git checkout, as `npm run setup` already does |
 | 2026-10-18 | Smoke test section 6 prints `ERROR [Better Auth]: Database schema mismatch – Missing tables session, account, verification, twoFactor` | Not a failure: `betterAuth()` checks the schema when initialized, and the test initializes it on an empty database before running migrations. The following checks confirm the migrations created all five tables and all 7 checks passed. The app must run migrations in `npm run setup` before startup. Test left unchanged |
 
 ---
@@ -609,4 +611,7 @@ pushes happened only when I asked.
 
 **Submission package.** Built from the committed tree with `git archive` (tracked files
 only: no `node_modules`, `.next`, `.git`, `data/`, databases, env files, certificates, keys,
-backups or test artifacts) and scanned for key material before handing over (D11).
+backups or test artifacts) and scanned for key material before handing over (D11). The ZIP
+was then installed and tested as a grader would: extracted to an empty folder, `npm ci
+--ignore-scripts` (see Problems), lint, `npm test` (307 pass, 2 skipped), setup,
+`setup:check`, build, `test:http`, `test:settlement`, `test:reconcile` – all pass.

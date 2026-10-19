@@ -80,6 +80,13 @@ npm.cmd run setup          # creates data/: databases, dev CA + certificates, pe
 npm.cmd run setup:check    # read-only verification – every line should say PASS
 ```
 
+**If `npm ci` stops at `better-sqlite3` with `gyp ERR! find VS … Could not find any Visual
+Studio installation`:** `npm ci` tries to compile it from source although the package ships a
+prebuilt Windows binary (`prebuilds/win32-x64.node`). Run `npm.cmd ci --ignore-scripts`
+instead – no dependency needs an install script on Windows (verified on a fresh copy of the
+submission: lint, all tests and the real-process checks pass). Installing the Visual Studio
+C++ Build Tools also works.
+
 `npm run setup` is safe to repeat: it creates only what is missing, backs up and migrates
 outdated databases, and upgrades older installations in place (keys, sessions and data are
 kept). Everything it generates lives in the git-ignored `data/` folder; each computer runs

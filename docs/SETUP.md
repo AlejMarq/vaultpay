@@ -41,6 +41,13 @@ npm.cmd run test:http      # the built app over real HTTP, on a temporary instal
 npm.cmd run dev            # http://localhost:3000 (listens on 127.0.0.1 only)
 ```
 
+**If `npm ci` stops at `better-sqlite3` with `gyp ERR! find VS … Could not find any Visual
+Studio installation`:** `npm ci` tries to compile it from source although the package ships a
+prebuilt Windows binary (`prebuilds/win32-x64.node`). Run `npm.cmd ci --ignore-scripts`
+instead – no dependency needs an install script on Windows (verified on a fresh copy of the
+submission: lint, all tests and the real-process checks pass). Installing the Visual Studio
+C++ Build Tools also works.
+
 `npm.cmd` is used because PowerShell may block `npm.ps1`; `npm` works in other shells.
 `npm run start` (after `npm run build`) also listens on `127.0.0.1` only.
 

@@ -214,7 +214,11 @@ test('data/ is restricted to the current user (best-effort ACL)', async (t) => {
   }
 });
 
-test('generated paths are git-ignored in this repository', () => {
+// Like `npm run setup` itself, this check needs a git checkout; a copy without .git (e.g. the
+// submission ZIP built with `git archive`) has no ignore rules to check.
+const NOT_A_CHECKOUT = !fs.existsSync(path.join(REPO_ROOT, '.git')) && 'not a git checkout (e.g. an extracted submission ZIP)';
+
+test('generated paths are git-ignored in this repository', { skip: NOT_A_CHECKOUT }, () => {
   for (const p of ['data/db/identity.db', 'data/secrets/web.env', 'data/pki/ca.key', 'data/pki/cbi.crt', 'data/setup-manifest.json',
     'data/backups/x/secrets/web.env', 'elsewhere/copy.env', 'elsewhere/copy.crt', 'elsewhere/copy.key']) {
     assert.doesNotThrow(() => execFileSync('git', ['-C', REPO_ROOT, 'check-ignore', '-q', '--', p]), `${p} must be ignored`);
