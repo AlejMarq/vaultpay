@@ -110,8 +110,10 @@ migrations. Migration files are checksummed – an edited migration stops setup.
 Keys are Ed25519 (used with `jose`). Certificate paths inside the files are relative to
 `data/`. The Next.js app reads `web.env` itself (it is never copied into `process.env`).
 
-**Mutual TLS** currently covers the Core Banking links: Settlement → CBI,
-Reconciliation (inside Next.js) → CBI with a read-only scope, and CBI → mock Core Banking.
+**Mutual TLS** covers every link between processes: Next.js → Identity and CBI, the fraud
+and settlement workers → Fraud & Risk and Settlement, Settlement → Identity and CBI,
+reconciliation (`npm run reconcile`) → Identity and CBI with a read-only scope, and CBI →
+mock Core Banking (docs/SERVICE_AUTH.md).
 
 ## 4. Demo accounts (localhost only)
 

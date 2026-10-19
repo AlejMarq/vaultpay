@@ -312,10 +312,11 @@ Step 9 regression tests (final review):
 | 2 – Setup, databases, PKI, secrets, demo data | Pending (needs Phase 0 laptop steps, then `npm ci` + `npm run setup`) | Done 2026-10-18 (Sections A–C): `npm test` 123 tests – 122 pass, 0 fail, 1 skipped (file symlinks need Developer Mode); `npm run setup` on the existing install added only the mock Core Banking DB and demo data (keys and certificates kept); repeat run kept everything; `npm run setup:check` 11/11 PASS; `NODE_ENV=production` refused; lint, build, smoke test pass | Not yet: login/TOTP UI, transfer endpoints, Fraud/Settlement/CBI services (later steps). `/api/health` still uses an in-memory DB |
 | 3 – Authentication, MFA, roles, KYC | Pending (`git pull`, `npm ci`, `npm run setup` migrates to identity v3 / transaction v2) | Done 2026-10-19 (Sections 3A–3F): `npm test` 218 tests – 217 pass, 0 fail, 1 skipped; `npm run test:http` 134/134; lint, build, smoke, setup, `setup:check` 11/11 PASS; production audit 0 vulnerabilities | Next: Step 4 (Core Banking Integration, balances) and Step 5 (transfers, which must call `requireVerifiedCustomer()` again just before creating a transfer) |
 | 4 – Core Banking integration and balances | Pending (`git pull`, `npm ci`, `npm run setup` – upgrades the secrets layout and issues the new certificates) | Done 2026-10-19 (4A–4C): `npm test` 254 – 253 pass, 0 fail, 1 skipped; `test:http` 144/144 (twice); `test:services` 28/28; `test:mock-bank` 10/10; lint, build, smoke, setup, `setup:check` pass; home PC upgraded in place | Next: Step 5 (transfers) – see "Before Step 5" below |
-| 5 – Transfer initiation | Pending (`git pull`, `npm ci`, `npm run setup` – migrates the transaction DB to v3) | Done 2026-10-19: `npm test` 269 – 268 pass, 0 fail, 1 skipped; `test:http` 170/170; `test:services` and `test:mock-bank` pass; lint, build, smoke, setup (v2 → v3 with backup), `setup:check` pass | Not committed yet. Next: Step 6 (fraud screening from the outbox) |
-| 6 – Fraud screening | Pending (`git pull`, `npm ci`, `npm run setup` – adds fraud/orchestrator credentials, transaction DB v4) | Done 2026-10-19: `npm test` 281 – 280 pass, 0 fail, 1 skipped; `test:http` 178/178; `test:fraud` 13/13; `test:services`, `test:mock-bank`, lint, build, smoke, setup (v3 → v4, credentials upgraded in place), `setup:check` pass | Not committed yet. Next: Step 7 (settlement from the `settlement` outbox) |
-| 7 – Settlement and ledger | Pending (`git pull`, `npm ci`, `npm run setup` – adds the Settlement server certificate, Identity's decision public key, transaction DB v5, bank DB v2) | Done 2026-10-19: `npm test` 292 – 291 pass, 0 fail, 1 skipped; `test:http` 186/186; `test:settlement` 20/20; `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Not committed yet. Next: Step 8 (operations dashboard, reconciliation) |
-| 8 – Operations, reconciliation, recovery | Pending (`git pull`, `npm ci`, `npm run setup` – moves the Reconciliation certificate to `recon.env`, transaction DB v6) | Done 2026-10-19: `npm test` 305 – 304 pass, 0 fail, 1 skipped; `test:http` 197/197; `test:reconcile` 17/17; `test:settlement`, `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Not committed yet. Next: final review and submission packaging |
+| 5 – Transfer initiation | Pending (`git pull`, `npm ci`, `npm run setup` – migrates the transaction DB to v3) | Done 2026-10-19: `npm test` 269 – 268 pass, 0 fail, 1 skipped; `test:http` 170/170; `test:services` and `test:mock-bank` pass; lint, build, smoke, setup (v2 → v3 with backup), `setup:check` pass | Committed in `24364f4` (Steps 5–8 checkpoint). |
+| 6 – Fraud screening | Pending (`git pull`, `npm ci`, `npm run setup` – adds fraud/orchestrator credentials, transaction DB v4) | Done 2026-10-19: `npm test` 281 – 280 pass, 0 fail, 1 skipped; `test:http` 178/178; `test:fraud` 13/13; `test:services`, `test:mock-bank`, lint, build, smoke, setup (v3 → v4, credentials upgraded in place), `setup:check` pass | Committed in `24364f4`. |
+| 7 – Settlement and ledger | Pending (`git pull`, `npm ci`, `npm run setup` – adds the Settlement server certificate, Identity's decision public key, transaction DB v5, bank DB v2) | Done 2026-10-19: `npm test` 292 – 291 pass, 0 fail, 1 skipped; `test:http` 186/186; `test:settlement` 20/20; `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Committed in `24364f4`. |
+| 8 – Operations, reconciliation, recovery | Pending (`git pull`, `npm ci`, `npm run setup` – moves the Reconciliation certificate to `recon.env`, transaction DB v6) | Done 2026-10-19: `npm test` 305 – 304 pass, 0 fail, 1 skipped; `test:http` 197/197; `test:reconcile` 17/17; `test:settlement`, `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Committed in `24364f4` (with the Step 9 review fixes D76/D77). |
+| 9 – Final review, documentation, packaging | Pending (`git pull`; no setup change) | Done 2026-10-19: review fixes D76/D77 with regression tests; `npm test` 309 – 308 pass, 0 fail, 1 skipped; all real-process checks pass; README, demo checklist; submission ZIP built with `git archive` and scanned (D11) | Steps 5–8 committed and pushed as `24364f4`; documentation in a separate final commit |
 
 ### Phase 0 dependency verification – home PC, 2026-10-18
 
@@ -568,3 +569,44 @@ transfer expires; a parked fraud check is retried only with `--requeue-dead`.
 - The 2-minute minimum age assumes no worker blocks longer than its timeouts (12 s) without
   losing its lease; a paused process holding a live lease is waited for, not overridden.
 - View de-duplication is in memory per Next.js process.
+
+### Step 9 – final review, documentation and packaging (home PC, 2026-10-19)
+
+**Lifecycle review.** Login + MFA, KYC and wallet authorization, transfer initiation and
+idempotency, fraud decisions, settlement and bank idempotency, the ledger, reconciliation and
+the operations view were re-read against the threat requirements and the tests.
+
+**Reconciliation safety question – "under exactly which conditions does 'no posting found'
+fail a transfer?"** Before this step: transfer in flight, open attempt older than 2 minutes,
+no outbox message leased (even expired), no settlement-message activity for 2 minutes, bank
+lookup `not_found`. **Not authoritative:** a released lease only means the worker stopped
+waiting. A request already handed to the bank can still commit later – CBI gives up after
+3 s, but the bank commits when it obtains its SQLite write lock (busy timeout up to 5 s) or
+after any pause of the bank process – so a `failed` transfer could later be debited with no
+ledger entry. The same race existed for a bank *refusal* received on a retry after an
+unanswered first send. **Fix (D76, D77):** a missing posting never fails a transfer (left
+unresolved, funds reserved; completed if the posting appears); a refusal fails only a
+first-and-only send. Regression tests race a late posting with reconciliation and a refusal
+with an earlier send; an invariant test checks that no `failed` transfer has a bank posting.
+
+**Leak review.** `/wallet`, `/send`, `/support`, `/operations`, outage pages, worker and
+service logs: no token, key, credential, bank account reference or internal error (HTTP and
+real-process checks assert it).
+
+**No other critical defect found.** Remaining limitations are listed in the README.
+
+**How the AI was used (whole project).** Work went step by step: for each step I gave the
+requirements and constraints, the AI inspected the code and docs, proposed or implemented
+the design, ran every test command on the home PC (Node 22 put first on `PATH`), and stopped
+for my approval; I approved, corrected or rejected (see the "My response" column in
+section 1). Corrections of mine that changed the design include: no signing key in Next.js
+(D43), no generic token endpoint and no caller-chosen bank accounts (D44, D62), MFA marker
+per session rather than "TOTP enrolled" (Step 3), read-only support with a separate audit
+writer, and keeping ambiguous transfers unresolved rather than failed (D76). Problems the AI
+introduced or missed and later fixed are in section 3 (e.g. DNS rebinding, TOTP replay,
+the build tracing `data/`, flaky timing in settlement tests, the D76 race). Commits and
+pushes happened only when I asked.
+
+**Submission package.** Built from the committed tree with `git archive` (tracked files
+only: no `node_modules`, `.next`, `.git`, `data/`, databases, env files, certificates, keys,
+backups or test artifacts) and scanned for key material before handing over (D11).
