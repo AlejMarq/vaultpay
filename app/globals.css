@@ -47,3 +47,135 @@ a {
     color-scheme: dark;
   }
 }
+
+/* VaultPay – minimal shared styles */
+:root {
+  --muted: #666;
+  --border: #d4d4d4;
+  --error: #b42318;
+  --notice: #8a5a00;
+  --accent: #1d4ed8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --muted: #a3a3a3;
+    --border: #404040;
+    --error: #f97066;
+    --notice: #fdb022;
+    --accent: #60a5fa;
+  }
+}
+
+.page {
+  margin: 0 auto;
+  padding: 48px 16px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.narrow {
+  max-width: 480px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+input {
+  font: inherit;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+button {
+  font: inherit;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: inherit;
+  border-color: var(--border);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.error {
+  color: var(--error);
+}
+
+.notice {
+  color: var(--notice);
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+}
+
+.summary dt {
+  color: var(--muted);
+}
+
+a.button {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 8px 16px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.qr {
+  align-self: center;
+  background: #fff;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.key {
+  font-family: var(--font-geist-mono), monospace;
+  letter-spacing: 0.05em;
+  word-break: break-all;
+}
+
+.codes {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 6px 24px;
+  font-family: var(--font-geist-mono), monospace;
+}

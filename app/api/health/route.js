@@ -1,15 +1,17 @@
-// TEMPORARY Phase 0 check: proves Next.js 16 can load the better-sqlite3 native module
-// inside a server route. We replace this in Step 2 with a real health check.
-import Database from 'better-sqlite3';
+// Health check: reports only "ok" or "unavailable". Problem codes are logged on the
+// server, never returned, so the response reveals nothing about files or configuration.
 import { connection } from 'next/server';
 
-// Cache Components is enabled, so `export const dynamic` is not available. A synchronous
-// better-sqlite3 query would otherwise finish during prerendering and the build would
-// freeze the result; connection() makes the check run on every request.
+import { getAuth } from '@/lib/server/auth';
+import { checkHealth } from '@/lib/server/health';
+
 export async function GET() {
+  // Cache Components: run on every request, never at build time.
   await connection();
-  const db = new Database(':memory:');
-  const ok = db.prepare('SELECT 1 AS one').get().one === 1;
-  db.close();
-  return Response.json({ status: ok ? 'ok' : 'error' });
+  const { ok, problems } = await checkHealth({ checkAuth: getAuth });
+  if (!ok) console.error(`[health] unavailable: ${problems.join(', ')}`);
+  return Response.json(
+    { status: ok ? 'ok' : 'unavailable' },
+    { status: ok ? 200 : 503, headers: { 'Cache-Control': 'no-store' } },
+  );
 }

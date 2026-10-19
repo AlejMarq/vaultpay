@@ -7,20 +7,22 @@
     "node": ">=22.0.0 <23.0.0"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
-    "start": "next start",
+    "start": "next start --hostname 127.0.0.1",
     "lint": "eslint",
     "setup": "node scripts/setup.mjs",
     "setup:check": "node scripts/setup-check.mjs",
     "smoke": "node scripts/smoke-test.mjs",
-    "test": "node --test \"tests/**/*.test.mjs\""
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "test:http": "node scripts/http-check.mjs"
   },
   "dependencies": {
     "better-auth": "1.7.10",
     "better-sqlite3": "13.0.3",
     "jose": "6.2.12",
     "next": "16.4.1",
+    "qrcode": "1.5.4",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zod": "4.6.7"
