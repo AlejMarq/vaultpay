@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { test } from 'node:test';
 
 import { createPostingLookup, createReconciler } from '../../lib/orchestrator/reconciliation.js';
@@ -349,4 +350,63 @@ test('reconciliation never posts: no lookup path can create a bank posting, with
   await h.recon({ lookupPosting: spy }).reconcile();
   assert.deepEqual(keys, [h.state(id).attempts[0].idempotency_key], 'only the attempt\'s own key is used');
   assert.equal(h.bankRo.prepare('SELECT count(*) AS n FROM posting').get().n, before);
+});
+
+// ---------------------------------------------------------------------------
+// Threat 284: finished transfers are compared with the bank's own records
+// ---------------------------------------------------------------------------
+test('threat 284: completed and failed transfers are compared with the bank once; agreement is recorded as matched', async (t) => {
+  const h = await reconHarness(t);
+  const ok = await h.approved(1250);
+  await h.settler().runOnce();
+  h.bankDb.prepare("UPDATE account SET status = 'frozen' WHERE account_ref = 'MCB-1002'").run();
+  const refused = await h.approved(500);
+  await h.settler().runOnce(); // first send refused by the bank → failed, nothing posted
+  h.bankDb.prepare("UPDATE account SET status = 'active' WHERE account_ref = 'MCB-1002'").run();
+  assert.deepEqual([h.state(ok).status, h.state(refused).status], ['completed', 'failed']);
+  h.clock.advance(2000);
+  assert.deepEqual(await h.recon().verifyFinished(), { matched: 2 });
+  assert.deepEqual(h.results(ok), [{ result: 'matched', core_banking_ref: h.postings(ok)[0].posting_ref }]);
+  assert.deepEqual(h.results(refused), [{ result: 'matched', core_banking_ref: null }]);
+  assert.deepEqual(await h.recon().verifyFinished(), {}, 'compared once');
+});
+
+test('threat 284: a tampered settlement result is detected – wrong posting reference, a "settled" the bank never posted, a "failed" the bank did post', async (t) => {
+  const h = await reconHarness(t);
+  const fakeRef = () => `MCBP-${crypto.randomBytes(10).toString('hex')}`;
+  // (1) The bank posted, but the result recorded a different posting reference.
+  const wrongRef = await h.approved(1000);
+  await h.settler({ requestSettlement: async (b) => { const r = await h.requestSettlement(b); return { ...r, json: { ...r.json, postingRef: fakeRef() } }; } }).runOnce();
+  // (2) "Settled" although nothing reached the bank.
+  const phantom = await h.approved(2000);
+  await h.settler({ requestSettlement: async () => ({ status: 200, json: { outcome: 'settled', postingRef: fakeRef() } }) }).runOnce();
+  // (3) "Rejected" although the bank posted (the money left Alice's account).
+  const hidden = await h.approved(3000);
+  await h.settler({ requestSettlement: async (b) => { await h.requestSettlement(b); return { status: 200, json: { outcome: 'rejected', reason: 'insufficient_funds' } }; } }).runOnce();
+  assert.deepEqual([wrongRef, phantom, hidden].map((id) => h.state(id).status), ['completed', 'completed', 'failed'], 'the tampered results were recorded');
+
+  h.clock.advance(2000);
+  assert.deepEqual(await h.recon().verifyFinished(), { mismatched: 3 });
+  for (const id of [wrongRef, phantom, hidden]) {
+    assert.deepEqual(h.results(id), [{ result: 'mismatched', core_banking_ref: null }], id);
+    assert.deepEqual(h.audit(id), ['reconciliation.mismatch'], id);
+  }
+  assert.deepEqual([wrongRef, phantom, hidden].map((id) => h.state(id).status), ['completed', 'completed', 'failed'], 'flagged, not corrected');
+  const sp = await h.verifiedLogin(support);
+  const o = getOperationsOverview(sp.viewer, { transactionDb: h.transactionRo, audit: createAuditWriter(h.transactionRw) });
+  assert.deepEqual(o.exceptions.map((e) => e.transferId).sort(), [wrongRef, phantom, hidden].sort(), 'shown as exceptions on /operations');
+});
+
+test('threat 284: verification while the bank path is down records nothing and is retried', async (t) => {
+  const h = await reconHarness(t);
+  const id = await h.approved(1250);
+  await h.settler().runOnce();
+  h.clock.advance(2000);
+  await h.close(h.cbi);
+  assert.deepEqual(await h.recon().verifyFinished(), { postponed: 1 });
+  assert.deepEqual(h.results(id), []);
+  for (const bad of [{ status: 'posted' }, { status: 'gone' }, null]) {
+    assert.deepEqual(await h.recon({ lookupPosting: async () => bad }).verifyFinished(), { postponed: 1 });
+  }
+  assert.deepEqual(h.results(id), []);
 });

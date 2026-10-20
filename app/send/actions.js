@@ -10,9 +10,14 @@ import { redirect } from 'next/navigation';
 
 import { AccessDenied, deniedPath } from '@/lib/server/dal';
 import { assertSameOrigin } from '@/lib/server/origin';
+import { clientKey, createTransferRateLimiter } from '@/lib/server/rate-limit';
 import { loadCustomerBalance, readOnlyIdentityDb, requireVerifiedCustomer } from '@/lib/server/session';
 import { initiateTransfer, reviewTransfer } from '@/lib/server/transfer-initiation';
 import { transferWriter } from '@/lib/server/transfer-orchestrator';
+
+// One limiter per server process (threat 121): per-account limits on transfer confirmations.
+const LIMITER = Symbol.for('vaultpay.transfer-rate-limiter');
+const transferLimiter = () => (globalThis[LIMITER] ??= createTransferRateLimiter());
 
 export async function transferAction(_previousState, formData) {
   assertSameOrigin(await headers());
@@ -39,6 +44,8 @@ export async function transferAction(_previousState, formData) {
           identityDb: readOnlyIdentityDb(),
           writer: transferWriter(),
           fetchBalance: () => loadCustomerBalance(viewer),
+          limiter: transferLimiter(),
+          client: clientKey(await headers()),
         });
         break;
       default: // 'edit' (change the details) or 'new' (another transfer)

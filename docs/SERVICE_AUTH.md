@@ -231,6 +231,13 @@ older than 2 minutes and no unexpired lease on their messages.
    `mismatch` → result `mismatched` (once) and left in flight; anything else → audit
    `reconciliation.unresolved`, nothing changes.
 
+**Comparison of finished transfers (threat 284):** each pass also looks up, with the same
+read-only token flow, every `completed` or `failed` transfer that has no reconciliation result
+yet: `completed` agrees only if the bank returns `posted` with exactly the posting reference
+VaultPay recorded; `failed` agrees only on `not_found`. Disagreement → `reconciliation_result`
+`mismatched` + audit `reconciliation.mismatch` (no correction); an unreachable bank or invalid
+answer records nothing.
+
 The lookup cannot post: a records token is refused at `/v1/postings`, a settlement token at
 `/v1/postings/lookup`, and only `vaultpay-recon` may call either the lookup or its Identity
 endpoint. Concurrent reconcilers are safe: the bank call is read-only, and only one

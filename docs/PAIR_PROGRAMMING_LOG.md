@@ -93,6 +93,8 @@ Assignment 5" and "Known limitations" sections are built from it.
 | D75 | 2026-10-19 | Test/demo knob | `VAULTPAY_RECONCILE_MIN_AGE_MS` (default 120000) | **AI proposal** | Lets the real-process checks and the demo reconcile within seconds. |
 | D76 | 2026-10-19 | Step 9 review: "no posting found" | Never fails a transfer. Left unresolved (audit `reconciliation.unresolved`), funds reserved; the next pass completes it if the posting appears; otherwise manual resolution with the bank | **My requirement** ("if it cannot be guaranteed, keep it unresolved") after the AI's analysis showed the D71 conditions are not a guarantee | Released lease ≠ finished request: CBI stops waiting after 3 s, but a request already inside the bank commits when it gets its SQLite lock (up to 5 s busy timeout) or after any process pause. Regression test races a late posting with reconciliation. |
 | D77 | 2026-10-19 | Step 9 review: bank refusal after an unanswered send | `rejected` is definitive only for an attempt created in the same claim (key sent exactly once); otherwise treated as unknown and retried with the same key | **AI proposal** (same race as D76, found in the same review) | Otherwise an earlier copy of the request could post after the refusal and leave a `failed` transfer debited at the bank. Regression test. |
+| D78 | 2026-10-19 | Final compliance review – threat 121 (Critical, rank 1) | Assignment 5 names per-account, per-route rate limits on the transfer route and per-account/global pending-backlog limits; only login/MFA were limited | **My requirement** (meet the Assignment 4/5 documents) – the AI found the gap when comparing code with the originals | `createTransferRateLimiter` (30 confirmations/min per customer, checked before any work), `MAX_PENDING_PER_WALLET` 20 / `MAX_PENDING_TOTAL` 2,000 inside the write transaction; "try again later" messages; unit, concurrency and HTTP tests. |
+| D79 | 2026-10-19 | Final compliance review – threat 284 | Assignment 5's primary control is Reconciliation & Audit comparing VaultPay's records with Core Banking's; only open outcomes were reconciled | **My requirement** – gap found in the same review | `verifyFinished`: every completed/failed transfer is compared once with the bank's record for its key through the existing read-only lookup; matched/mismatched recorded, mismatches audited and shown on `/operations`, never corrected; tests simulate three kinds of tampered settlement results. |
 
 ### D1 notes – why each process exists
 - **Next.js app** – required stack; hosts UI, API routes, Identity, Orchestrator & Ledger (+ background loop), Ops Support, Reconciliation & Audit.
@@ -181,6 +183,7 @@ Assignment 5" and "Known limitations" sections are built from it.
 | 2026-10-19 | **Step 9 review – correctness defect:** reconciliation marked a transfer `failed` when the bank had no posting for its key and no worker had touched it for 2 minutes. That is not authoritative: a request already delivered to the bank can commit later (lock wait, pause), leaving a failed transfer debited with no ledger entry. The same race existed for a bank refusal received on a retry | D76, D77: absence never fails a transfer; a refusal fails only a first-and-only send. Two regression tests (late posting after a "not found" lookup; refusal after an unanswered send) and the real-process check updated |
 | 2026-10-19 | Step 9 packaging check: `npm ci` in a fresh copy of the submission ZIP stopped at `better-sqlite3` (`gyp ERR! … Could not find any Visual Studio installation`) – npm ran `node-gyp rebuild` although the package declares `"gypfile": false` and ships `prebuilds/win32-x64.node`; this PC has no C++ build tools. The working install in `C:\dev\vaultpay` was never compiled | Documented `npm.cmd ci --ignore-scripts` (no dependency needs an install script on Windows); verified on the fresh copy: lint, `npm test`, setup, `setup:check`, build, `test:http`, `test:settlement`, `test:reconcile` pass. No dependency changed |
 | 2026-10-19 | Step 9 packaging check: the test "generated paths are git-ignored" failed in the ZIP copy (no `.git`; `git archive` excludes it by design) | Test skips outside a git checkout, as `npm run setup` already does |
+| 2026-10-19 | **Final compliance review** against my original Assignment 4 ("Top 15 – Prioritized Threats for VaultPay") and Assignment 5 ("VaultPay – Next.js Threat-Mitigation Architecture") documents: two prioritized threats lacked the primary control Assignment 5 names – 121 (no per-account/per-route limit on transfers, no backlog limits) and 284 (finished transfers never compared with the bank). Earlier steps had worked from this log's summary of the design, not the original documents | D78, D79 implemented with tests; README threat-to-control table rebuilt from the original Assignment 4 list; remaining deviations from Assignment 5 listed in the README |
 | 2026-10-18 | Smoke test section 6 prints `ERROR [Better Auth]: Database schema mismatch – Missing tables session, account, verification, twoFactor` | Not a failure: `betterAuth()` checks the schema when initialized, and the test initializes it on an empty database before running migrations. The following checks confirm the migrations created all five tables and all 7 checks passed. The app must run migrations in `npm run setup` before startup. Test left unchanged |
 
 ---
@@ -304,6 +307,14 @@ Step 9 regression tests (final review):
 | Invariant | Every `failed` transfer's key has no bank posting; every bank posting belongs to a completed transfer | Pass | 2026-10-19 |
 | Real processes | `test:reconcile`: Settlement unreachable → "not found" → in flight and reserved (not failed); Settlement back → the same key settles it once | Pass | 2026-10-19 |
 
+Final compliance review tests:
+
+| Threat / control | Test | Result | Date |
+|--------|------|--------|------|
+| 121 | 30 confirmations per minute per customer are processed, the 31st refused before the balance flow or database is touched; other customers unaffected; window resets (`transfers.test.mjs`, HTTP "Transfer flood") | Pass | 2026-10-19 |
+| 121 / 272 / 287 | Pending backlog bounded per wallet and in total; 30 concurrent writers on separate connections → exactly 20 accepted; repeats of accepted keys still answered | Pass | 2026-10-19 |
+| 284 | Completed and failed transfers compared once with the bank (`matched`); a wrong posting reference, a "settled" the bank never posted and a "failed" the bank did post are all flagged `mismatched` + audited + shown as exceptions, not corrected; bank down → nothing recorded, retried | Pass | 2026-10-19 |
+
 ---
 
 ## 5. Phase status
@@ -319,6 +330,7 @@ Step 9 regression tests (final review):
 | 7 – Settlement and ledger | Pending (`git pull`, `npm ci`, `npm run setup` – adds the Settlement server certificate, Identity's decision public key, transaction DB v5, bank DB v2) | Done 2026-10-19: `npm test` 292 – 291 pass, 0 fail, 1 skipped; `test:http` 186/186; `test:settlement` 20/20; `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Committed in `24364f4`. |
 | 8 – Operations, reconciliation, recovery | Pending (`git pull`, `npm ci`, `npm run setup` – moves the Reconciliation certificate to `recon.env`, transaction DB v6) | Done 2026-10-19: `npm test` 305 – 304 pass, 0 fail, 1 skipped; `test:http` 197/197; `test:reconcile` 17/17; `test:settlement`, `test:fraud`, `test:services`, `test:mock-bank`, lint, build, smoke, setup (in place, backups, keys kept), `setup:check` pass | Committed in `24364f4` (with the Step 9 review fixes D76/D77). |
 | 9 – Final review, documentation, packaging | Pending (`git pull`; no setup change) | Done 2026-10-19: review fixes D76/D77 with regression tests; `npm test` 309 – 308 pass, 0 fail, 1 skipped; all real-process checks pass; README, demo checklist; submission ZIP built with `git archive` and scanned (D11) | Steps 5–8 committed and pushed as `24364f4`; documentation in a separate final commit |
+| 10 – Final compliance review | Pending (`git pull`; no setup change) | Done 2026-10-19: originals located (Assignment 4 list, Assignment 5 architecture, Project 2 instructions); D78/D79 implemented; `npm test` 315 – 314 pass, 0 fail, 1 skipped; all real-process checks pass; README rebuilt to the Project 2 deliverable list | Final commit and `Marquez_Project2_Source.zip` |
 
 ### Phase 0 dependency verification – home PC, 2026-10-18
 
@@ -615,3 +627,24 @@ backups or test artifacts) and scanned for key material before handing over (D11
 was then installed and tested as a grader would: extracted to an empty folder, `npm ci
 --ignore-scripts` (see Problems), lint, `npm test` (307 pass, 2 skipped), setup,
 `setup:check`, build, `test:http`, `test:settlement`, `test:reconcile` – all pass.
+
+### Final compliance review (home PC, 2026-10-19)
+
+**Original specifications used** (outside the repository, on this computer): Project 2
+instructions (`Downloads\Project 2.docx`), Assignment 4 submission (`Documents\SSD\A_A_4\Assignment 4_Amarquez.docx`
+– the 15 prioritized threats), Assignment 5 architecture (`Downloads\VaultPay_Architecture.docx`
+and `VaultPay_Assignment5_Presentation.pptx`), Project 1 (`Documents\SSD\P1\`). Until this
+review the implementation had been checked against this log's summary of the design; the
+review compared the code with the original documents.
+
+**Findings.** All 15 Assignment 4 threats have an implemented, tested control; two primary
+controls named in Assignment 5 were missing and are now implemented (D78 for 121, D79 for
+284). Architecture differences that remain (single Next.js app for customers and support, no
+WAF/shared-store limiter/KMS/sandbox/replication/circuit breaker, no QR and KYC onboarding
+screens, SQLite file checks instead of TLS to a database server) are listed with reasons in
+the README.
+
+**Documentation.** README rebuilt to the Project 2 deliverable list (summary, prerequisites,
+install/run, configuration, accounts, threat-to-control mapping with files, functions and
+tests, Assignment 5 fidelity, deviations, limitations, dependency inventory);
+`docs/PRESENTATION_PREP.md` added; SETUP, SERVICE_AUTH and DEMO_CHECKLIST aligned.

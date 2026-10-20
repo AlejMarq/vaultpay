@@ -17,6 +17,8 @@ const MESSAGES = {
   insufficient_funds: 'Your available balance is not enough for this transfer.',
   banking_unavailable: 'We cannot check your balance right now, so the transfer was not sent. Please try again later.',
   unavailable: 'The transfer could not be submitted right now. Nothing was sent. Please try again.',
+  rate_limited: 'Too many transfer attempts. Nothing was sent. Please wait a minute and try again.',
+  backlog_full: 'Too many transfers are still being processed. Nothing was sent. Please try again later.',
 };
 
 const initialState = { step: 'edit', values: { recipient: '', amount: '' } };

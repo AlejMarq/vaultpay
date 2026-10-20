@@ -6,8 +6,8 @@
 //                                              messages of still-pending transfers a new try
 //
 // A pass: expire overdue pending transfers that never reached settlement, reconcile
-// ambiguous settlements with the bank (read-only), check ledger integrity
-// (lib/orchestrator/reconciliation.js).
+// ambiguous settlements with the bank (read-only), compare finished transfers with the
+// bank's records, check ledger integrity (lib/orchestrator/reconciliation.js).
 //
 // Owns: data/secrets/recon.env – the Reconciliation client certificate (CN=vaultpay-recon)
 // – and a writable transaction DB connection. Reaches Identity (VAULTPAY_IDENTITY_PORT,
@@ -49,7 +49,8 @@ const minAgeMs = Number.isInteger(minAgeSetting) && minAgeSetting >= 1000 && min
 const lookupPosting = createPostingLookup({ credentials: config.tls, identityPort, cbiPort });
 
 const reconciler = createReconciler({ db, lookupPosting, minAgeMs, log: (msg) => console.log(`[reconcile] ${msg}`) });
-const summary = (r) => `expired=${r.expired} requeued=${r.requeued} ${Object.entries(r.reconciled).map(([k, v]) => `${k}=${v}`).join(' ') || 'nothing to reconcile'} integrity_issues=${r.integrityIssues}`;
+const summary = (r) => `expired=${r.expired} requeued=${r.requeued} ${Object.entries(r.reconciled).map(([k, v]) => `${k}=${v}`).join(' ') || 'nothing to reconcile'}`
+  + ` verified: ${Object.entries(r.verified).map(([k, v]) => `${k}=${v}`).join(' ') || 'none due'} integrity_issues=${r.integrityIssues}`;
 
 if (once) {
   console.log(`[reconcile] done: ${summary(await reconciler.runOnce({ requeue }))}`);

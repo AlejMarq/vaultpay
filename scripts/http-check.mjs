@@ -853,6 +853,18 @@ try {
   check('the outage refusal reveals nothing internal', downLeaks2.length === 0, downLeaks2.join(', '));
   check('the wallet page still works without a balance', cbiDown.html.includes('wal_demo_alice') && cbiDown.html.includes('Recent transfers'));
 
+  // Threat 121: per-account limit on transfer confirmations (the services are down by now,
+  // so each counted attempt ends as "banking unavailable" – the limit applies before that).
+  console.log('\nTransfer flood (threat 121)');
+  const flood = [];
+  for (let i = 0; i < 31; i += 1) {
+    flood.push((await sendAction(bobBrowser, confirmFields(r3, { recipient: alice.email, sourceWalletId: 'wal_demo_bob', idempotencyKey: `http-flood-key-${String(i).padStart(4, '0')}` }))).state?.error);
+  }
+  check('30 confirmations per minute are processed, the 31st is refused before any work', flood.slice(0, 30).every((e) => e !== 'rate_limited') && flood[30] === 'rate_limited', JSON.stringify(flood.slice(-3)));
+  check('the flood created no transfer', transactionRo.prepare("SELECT count(*) AS n FROM transfer WHERE sender_wallet_id = 'wal_demo_bob' AND transfer_id <> 'trf_b_to_a'").get().n === 0);
+  const aliceAfterFlood = (await sendAction(aw, confirmFields(r3, { idempotencyKey: 'http-flood-alice-0001' }))).state?.error;
+  check('another customer is not affected by Bob\'s limit', aliceAfterFlood !== 'rate_limited', String(aliceAfterFlood));
+
   // Last, because it locks Carol's sign-in for 15 minutes in this server process.
   console.log('\nRate limiting');
   for (let i = 0; i < 5; i += 1) await loginAs(carol, `wrong-${i}`);

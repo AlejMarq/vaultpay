@@ -228,6 +228,7 @@ Rules (all checked on the server at confirmation, again just before saving):
 | Sender | MFA in this session, active customer, approved latest KYC, the active wallet they own (the one their balance comes from) |
 | Recipient | Another active customer with an active wallet (KYC is not required to *receive*). Unknown emails, staff accounts, suspended customers and frozen wallets all get the same message: *"That recipient cannot receive transfers."* |
 | Amount | $0.01 – $1,000.00 per transfer, at most two decimals, parsed as integer cents |
+| Flood limits (threat 121) | At most 30 confirmations per minute per customer (*"Too many transfer attempts"*); at most 20 not-yet-final transfers per wallet and 2,000 in total (*"Too many transfers are still being processed"*). Nothing is written when a limit applies |
 | Funds | Your bank balance (fetched through Identity and CBI) minus your transfers still pending must cover it. If the balance cannot be fetched, the transfer is **not** accepted ("We cannot check your balance right now"). This is a preliminary check: the bank enforces funds again at settlement. |
 | Duplicates | Each confirmation carries a one-time request key. Submitting it again (double click, retry after an error) returns the same transfer; it is never created twice. |
 
@@ -249,6 +250,7 @@ record cannot be written, nothing is shown. Support's database connections are r
 | Localhost only | Listens on `127.0.0.1`; requests addressed to any other host name (DNS rebinding) get no session, no Server Action and a `403` from `/api/health` |
 | No public auth routes | Better Auth runs only through Server Actions; `/api/auth/*` does not exist (no self-registration) |
 | CSRF | Every Server Action requires an `Origin` matching the localhost `Host` (missing Origin is refused too); cookies are `HttpOnly; SameSite=Lax` |
+| Transfer limits | 30 confirmations per minute per customer; pending backlog ≤ 20 per wallet, ≤ 2,000 total (threat 121) |
 | Login rate limits | 5 failures per client + email, 10 per email, 30 per client, in 15 minutes; unknown emails are limited the same way |
 | MFA rate limits | VaultPay: 5 per client + user, 8 per user, in 15 minutes; Better Auth: 5 attempts per challenge and a 15-minute lock after 10 consecutive failures |
 | TOTP replay protection | Each TOTP code is claimed (hashed, per user) before Better Auth checks it, so one code completes at most one verification – also across concurrent attempts. Claims last 2 minutes. |
@@ -427,7 +429,13 @@ A pass:
 3. **Requeues** (only with `--requeue-dead`) a parked fraud check of a transfer still awaiting
    screening, or a parked settlement message of a transfer not yet sent – as a new message.
    Settlements already in flight are never requeued; reconciliation resolves them.
-4. **Checks the ledger** (debits = credits; one debit + credit per completed transfer) and
+4. **Compares finished transfers with the bank** (threat 284): every completed or failed
+   transfer is checked once against the bank's own record for its attempt's key – completed
+   must match the bank's posting exactly, failed must have no posting. Agreement → result
+   `matched`; anything else → `mismatched`, audit `reconciliation.mismatch`, listed as an
+   exception on `/operations` – never corrected. If the bank cannot be asked, it is retried
+   next pass.
+5. **Checks the ledger** (debits = credits; one debit + credit per completed transfer) and
    records any issue as `ledger.integrity_mismatch` – never corrects it.
 
 Every outcome is recorded (`reconciliation_result`, audit events `transfer.reconciled`,

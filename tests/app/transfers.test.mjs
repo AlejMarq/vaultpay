@@ -7,7 +7,8 @@ import { AccessDenied } from '../../lib/server/dal.js';
 import { openTransactionDb } from '../../lib/server/db/index.js';
 import { formatCents, MAX_TRANSFER_CENTS, parseUsdToCents } from '../../lib/server/money.js';
 import { initiateTransfer, reviewTransfer } from '../../lib/server/transfer-initiation.js';
-import { canTransition, createTransferWriter, HOLDING_STATUSES, TRANSFER_TRANSITIONS } from '../../lib/server/transfer-orchestrator.js';
+import { createTransferRateLimiter, TRANSFER_LIMITS } from '../../lib/server/rate-limit.js';
+import { canTransition, createTransferWriter, HOLDING_STATUSES, MAX_PENDING_PER_WALLET, TRANSFER_TRANSITIONS } from '../../lib/server/transfer-orchestrator.js';
 import { recentTransfers } from '../../lib/server/transfers.js';
 import { getWalletOverview } from '../../lib/server/wallet.js';
 import { DEMO_CUSTOMERS, DEMO_OPS_USERS } from '../../scripts/setup/demo-data.mjs';
@@ -472,4 +473,61 @@ test('the transfer writer validates its own input and never creates a completed 
   const { transfer } = writer.create({ ...ok, status: 'completed' });
   assert.equal(transfer.status, 'pending_risk');
   assert.equal(db.prepare('SELECT count(*) AS n FROM transfer').get().n, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Threat 121: request flood – per-account limit and pending-backlog limits
+// ---------------------------------------------------------------------------
+test('threat 121: transfer confirmations are rate-limited per account before any work is done', async (t) => {
+  const { s, rows, deps, login } = await transferHarness(t);
+  let clock = 1_000_000;
+  const limiter = createTransferRateLimiter(() => clock);
+  const a = await login(alice);
+  const b = await login(bob);
+  let balanceCalls = 0;
+  const counted = (who) => deps(who, { limiter, client: 'loopback', fetchBalance: async () => { balanceCalls += 1; return { available: false }; } });
+  const input = { recipientEmail: bob.email, amount: '1.00', sourceWalletId: 'wal_demo_alice', idempotencyKey: 'flood-key-000000001' };
+  for (let i = 0; i < TRANSFER_LIMITS.perEmail; i += 1) {
+    assert.equal((await initiateTransfer(a.viewer, input, counted(a))).error, 'banking_unavailable', `attempt ${i + 1} is processed`);
+  }
+  const limited = await initiateTransfer(a.viewer, input, counted(a));
+  assert.deepEqual([limited.step, limited.error], ['edit', 'rate_limited']);
+  assert.equal(balanceCalls, TRANSFER_LIMITS.perEmail, 'the limited attempt never reached the balance flow');
+  // Another customer is not affected; the window passes.
+  assert.equal((await initiateTransfer(b.viewer, { ...input, recipientEmail: alice.email, sourceWalletId: 'wal_demo_bob' }, counted(b))).error, 'banking_unavailable');
+  clock += TRANSFER_LIMITS.windowMs + 1;
+  assert.equal((await initiateTransfer(a.viewer, input, counted(a))).error, 'banking_unavailable');
+  assert.deepEqual(rows().transfers, []);
+  assert.ok(s.transactionRo);
+});
+
+test('threats 121/272/287: a pending backlog is bounded per wallet and in total, even under concurrency', async (t) => {
+  const { s, rows } = await transferHarness(t);
+  const base = { customerId: 'cus_demo_alice', senderWalletId: 'wal_demo_alice', recipientWalletId: 'wal_demo_bob', currency: 'USD', balanceCents: 10_000_000, amountCents: 100 };
+  assert.equal(MAX_PENDING_PER_WALLET, 20);
+  const small = createTransferWriter(s.transactionRw, { maxPendingPerWallet: 3, maxPendingTotal: 5 });
+  for (let i = 0; i < 3; i += 1) small.create({ ...base, idempotencyKey: `backlog-key-0000${i}` });
+  assert.throws(() => small.create({ ...base, idempotencyKey: 'backlog-key-00009' }), (err) => err.code === 'backlog_full');
+  // A repeat of an accepted key is still answered (it adds nothing to the backlog).
+  assert.equal(small.create({ ...base, idempotencyKey: 'backlog-key-00000' }).replayed, true);
+  // Global limit: Bob may add two, then everyone waits.
+  const bobBase = { ...base, customerId: 'cus_demo_bob', senderWalletId: 'wal_demo_bob', recipientWalletId: 'wal_demo_alice' };
+  small.create({ ...bobBase, idempotencyKey: 'backlog-bob-000001' });
+  small.create({ ...bobBase, idempotencyKey: 'backlog-bob-000002' });
+  assert.throws(() => small.create({ ...bobBase, idempotencyKey: 'backlog-bob-000003' }), (err) => err.code === 'backlog_full');
+  assert.equal(rows().transfers.length, 5);
+  // Concurrent writers on separate connections cannot exceed the per-wallet limit (the default, 20).
+  const results = await race(s.dataDir, Array.from({ length: 30 }, (_, i) => ({ ...base, senderWalletId: 'wal_demo_carol', customerId: 'cus_demo_carol', idempotencyKey: `backlog-race-${String(i).padStart(4, '0')}` })));
+  assert.equal(results.filter((r) => r.ok).length, MAX_PENDING_PER_WALLET, JSON.stringify(results.map((r) => r.code ?? 'ok')));
+  assert.ok(results.filter((r) => !r.ok).every((r) => r.code === 'backlog_full'));
+});
+
+test('threat 121: the backlog-full and rate-limited answers keep the customer informed and write nothing', async (t) => {
+  const { s, rows, deps, login } = await transferHarness(t);
+  const a = await login(alice);
+  const tiny = createTransferWriter(s.transactionRw, { maxPendingPerWallet: 0 });
+  const review = reviewTransfer(a.viewer, { recipientEmail: bob.email, amount: '2' }, { identityDb: s.identityRo }).review;
+  const r = await initiateTransfer(a.viewer, { ...review, recipientEmail: review.recipient }, deps(a, { writer: tiny }));
+  assert.deepEqual([r.step, r.error, r.review?.idempotencyKey], ['confirm', 'backlog_full', review.idempotencyKey], 'kept on the confirmation: retry later with the same key');
+  assert.deepEqual(rows().transfers, []);
 });

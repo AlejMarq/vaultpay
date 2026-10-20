@@ -57,7 +57,7 @@ Never reset an installation you want to keep. For a clean demo on a separate cop
 
 | # | Command / action | Expected result |
 |---|------------------|-----------------|
-| 6.1 | `npm.cmd run reconcile -- --once` | `… nothing to reconcile integrity_issues=0` |
+| 6.1 | `npm.cmd run reconcile -- --once` (at least 2 minutes after settlement, or with `$env:VAULTPAY_RECONCILE_MIN_AGE_MS='1000'`) | `… nothing to reconcile verified: matched=1 integrity_issues=0` – the completed transfer agrees with the bank's own record (threat 284). Earlier than 2 minutes: `verified: none due` |
 | 6.2 | Sign in as `support@example.test` / `VaultPayDemo-Support-1!` (+ TOTP) → *Operations overview* | *Ledger integrity*: Debits $12.50 · Credits $12.50 · 2 entries – **balanced**, no issues |
 
 ## 7. Support operations dashboard
